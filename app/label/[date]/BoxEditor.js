@@ -24,6 +24,8 @@ export default function BoxEditor({ date, images, labeledBy }) {
   const [tool, setTool] = useState("pen"); // "pen" | "eraser"
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState("");
+  const [hoveredBoxIndex, setHoveredBoxIndex] = useState(-1); // box nào đang hover
+  const [selectedBoxIndex, setSelectedBoxIndex] = useState(-1); // box nào được select để xóa
 
   const canvasRef = useRef(null);
   const imgObjRef = useRef(null);
@@ -66,12 +68,24 @@ export default function BoxEditor({ date, images, labeledBy }) {
     ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
 
     const [sx, sy] = scaleRef.current;
-    ctx.lineWidth = 2;
-    ctx.strokeStyle = BOX_COLOR;
-    for (const box of currentBoxes) {
+    
+    // Vẽ tất cả boxes
+    for (let i = 0; i < currentBoxes.length; i++) {
+      const box = currentBoxes[i];
       const [x, y, w, h] = toDisplayRect(box, sx, sy);
+      
+      // Highlight box được hover hoặc select
+      if (i === hoveredBoxIndex || i === selectedBoxIndex) {
+        ctx.lineWidth = 4;
+        ctx.strokeStyle = i === selectedBoxIndex ? "#00ff00" : "#ffaa00"; // Xanh cho selected, vàng cho hover
+      } else {
+        ctx.lineWidth = 2;
+        ctx.strokeStyle = BOX_COLOR;
+      }
+      
       ctx.strokeRect(x, y, w, h);
     }
+    
     if (draftRef.current) {
       const [x0, y0, x1, y1] = draftRef.current;
       ctx.strokeStyle = DRAFT_COLOR;
@@ -84,6 +98,11 @@ export default function BoxEditor({ date, images, labeledBy }) {
   // Load ảnh hiện tại vào canvas
   useEffect(() => {
     if (!current) return;
+    
+    // Reset highlight & selection khi chuyển ảnh
+    setHoveredBoxIndex(-1);
+    setSelectedBoxIndex(-1);
+    
     const img = new Image();
     img.onload = () => {
       const ratio = Math.min(DISPLAY_MAX_W / img.naturalWidth, DISPLAY_MAX_H / img.naturalHeight, 1);
@@ -107,12 +126,28 @@ export default function BoxEditor({ date, images, labeledBy }) {
   useEffect(() => {
     redraw();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [currentBoxes, isLocked]);
+  }, [currentBoxes, isLocked, hoveredBoxIndex, selectedBoxIndex]);
 
   function canvasPoint(e) {
     const canvas = canvasRef.current;
     const rect = canvas.getBoundingClientRect();
     return [e.clientX - rect.left, e.clientY - rect.top];
+  }
+
+  // Tìm box nào ở vị trí (px, py) trên canvas
+  function findBoxAt(px, py) {
+    const [sx, sy] = scaleRef.current;
+    const ox = px / sx;
+    const oy = py / sy;
+    
+    // Duyệt từ cuối lên để lấy box ở trên cùng (vẽ sau)
+    for (let i = currentBoxes.length - 1; i >= 0; i--) {
+      const [x, y, w, h] = currentBoxes[i];
+      if (ox >= x && ox <= x + w && oy >= y && oy <= y + h) {
+        return i;
+      }
+    }
+    return -1;
   }
 
   async function saveBoxesForCurrent(nextBoxes) {
@@ -149,16 +184,30 @@ export default function BoxEditor({ date, images, labeledBy }) {
       dragStartRef.current = [x, y];
       draftRef.current = [x, y, x, y];
     } else if (tool === "eraser") {
-      eraseAt(x, y);
+      const boxIdx = findBoxAt(x, y);
+      if (boxIdx >= 0) {
+        setSelectedBoxIndex(boxIdx);
+      }
     }
   }
 
   function handleMouseMove(e) {
-    if (tool !== "pen" || !dragStartRef.current) return;
+    if (!current) return;
+    
+    // Detect hover
     const [x, y] = canvasPoint(e);
+    const boxIdx = tool === "eraser" ? findBoxAt(x, y) : -1;
+    setHoveredBoxIndex(boxIdx);
+    
+    // Pen tool logic
+    if (tool !== "pen" || !dragStartRef.current) return;
     const [x0, y0] = dragStartRef.current;
     draftRef.current = [x0, y0, x, y];
     redraw();
+  }
+
+  function handleMouseLeave() {
+    setHoveredBoxIndex(-1);
   }
 
   function handleMouseUp(e) {
@@ -179,21 +228,6 @@ export default function BoxEditor({ date, images, labeledBy }) {
     const [sx, sy] = scaleRef.current;
     const box = [Math.round(left / sx), Math.round(top / sy), Math.round(w / sx), Math.round(h / sy)];
     saveBoxesForCurrent([...currentBoxes, box]);
-  }
-
-  function eraseAt(px, py) {
-    const [sx, sy] = scaleRef.current;
-    const ox = px / sx;
-    const oy = py / sy;
-    for (let i = currentBoxes.length - 1; i >= 0; i--) {
-      const [x, y, w, h] = currentBoxes[i];
-      if (ox >= x && ox <= x + w && oy >= y && oy <= y + h) {
-        const next = currentBoxes.slice();
-        next.splice(i, 1);
-        saveBoxesForCurrent(next);
-        return;
-      }
-    }
   }
 
   function removeBoxIndex(i) {
@@ -237,15 +271,19 @@ export default function BoxEditor({ date, images, labeledBy }) {
 
   useEffect(() => {
     function onKeyDown(e) {
-      if (busy) return;
+      if (busy || isLocked) return;
       if (e.key === "ArrowLeft") showPrev();
       else if (e.key === "ArrowRight") showNext();
       else if (e.key.toLowerCase() === "p") setTool("pen");
       else if (e.key.toLowerCase() === "x") setTool("eraser");
+      else if (e.key === "Delete" && selectedBoxIndex >= 0) {
+        removeBoxIndex(selectedBoxIndex);
+        setSelectedBoxIndex(-1);
+      }
     }
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [busy, images.length]);
+  }, [busy, images.length, selectedBoxIndex, isLocked]);
 
   const toolBtnStyle = (active) => ({
     padding: "6px 14px",
@@ -321,10 +359,16 @@ export default function BoxEditor({ date, images, labeledBy }) {
           onMouseDown={handleMouseDown}
           onMouseMove={handleMouseMove}
           onMouseUp={handleMouseUp}
+          onMouseLeave={handleMouseLeave}
         />
 
         <div style={{ fontSize: 12, color: "#666", margin: "4px 0" }}>
-          {tool === "pen" ? "Kéo chuột để vẽ khung xe." : "Click vào khung để xoá."} {msg}
+          {tool === "pen" 
+            ? "Kéo chuột để vẽ khung xe." 
+            : selectedBoxIndex >= 0 
+              ? `✓ Đã chọn khung #${selectedBoxIndex + 1}. Bấm [Delete] hoặc nút xóa để xoá.`
+              : "Rê chuột qua khung để highlight, click để chọn khung cần xoá."
+          } {msg}
         </div>
 
         <div style={{ display: "flex", gap: 8, margin: "8px 0", flexWrap: "wrap" }}>
@@ -334,6 +378,18 @@ export default function BoxEditor({ date, images, labeledBy }) {
           <button onClick={() => setConfirm(false)} disabled={busy || !isLocked}>
             Đánh label lại
           </button>
+          {selectedBoxIndex >= 0 && (
+            <button 
+              onClick={() => {
+                removeBoxIndex(selectedBoxIndex);
+                setSelectedBoxIndex(-1);
+              }} 
+              disabled={busy || isLocked}
+              style={{ background: "#ff3b30", color: "#fff" }}
+            >
+              🗑️ Xoá khung #{selectedBoxIndex + 1}
+            </button>
+          )}
           <span style={{ alignSelf: "center", fontSize: 13, color: "#555" }}>
             Đã vẽ {currentBoxes.length} xe
           </span>
@@ -352,7 +408,16 @@ export default function BoxEditor({ date, images, labeledBy }) {
             </thead>
             <tbody>
               {currentBoxes.map((b, i) => (
-                <tr key={i}>
+                <tr 
+                  key={i}
+                  onMouseEnter={() => tool === "eraser" && setHoveredBoxIndex(i)}
+                  onMouseLeave={() => setHoveredBoxIndex(-1)}
+                  onClick={() => tool === "eraser" && setSelectedBoxIndex(i)}
+                  style={{
+                    background: i === selectedBoxIndex ? "#00ff0033" : i === hoveredBoxIndex ? "#ffaa0033" : "transparent",
+                    cursor: isLocked ? "default" : "pointer",
+                  }}
+                >
                   <td style={{ border: "1px solid #ddd", padding: "2px 8px" }}>{i + 1}</td>
                   {b.map((v, j) => (
                     <td key={j} style={{ border: "1px solid #ddd", padding: "2px 8px" }}>

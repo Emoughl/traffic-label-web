@@ -1,7 +1,9 @@
 import { NextResponse } from "next/server";
-import { getServerSession } from "next-auth/next";
 import { authOptions } from "@/lib/authOptions";
-import { getFileBytes } from "@/lib/drive";
+import { getServerSession } from "next-auth/next";
+import { getFileThumbnailBytes } from "@/lib/drive";
+
+export const runtime = "nodejs";
 
 export async function GET(request, { params }) {
   const session = await getServerSession(authOptions);
@@ -11,7 +13,7 @@ export async function GET(request, { params }) {
 
   const { fileId } = params;
   try {
-    const { data, mimeType } = await getFileBytes(fileId);
+    const { data, mimeType } = await getFileThumbnailBytes(fileId);
     return new NextResponse(Buffer.from(data), {
       headers: {
         "Content-Type": mimeType,
@@ -19,6 +21,6 @@ export async function GET(request, { params }) {
       },
     });
   } catch (err) {
-    return NextResponse.json({ error: "not found" }, { status: 404 });
+    return NextResponse.json({ error: "thumbnail not found" }, { status: 404 });
   }
 }

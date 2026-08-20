@@ -4,6 +4,9 @@ import { authOptions } from "@/lib/authOptions";
 import { findFolderIdByDate, listImagesInFolder, invalidateCachesForDate } from "@/lib/drive";
 import { getLabeledFilenames } from "@/lib/sheets";
 
+export const dynamic = "force-dynamic";
+export const runtime = "nodejs";
+
 export async function GET(request) {
   try {
     const { searchParams } = new URL(request.url);

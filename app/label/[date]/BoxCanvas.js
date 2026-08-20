@@ -1,6 +1,7 @@
 "use client";
 
-import { useEffect, useRef } from "react";
+import { memo, useEffect, useRef, useState } from "react";
+import { getCachedImage, preloadImage } from "@/lib/imageCache";
 
 const DEFAULT_MAX_W = 1200;
 const DEFAULT_MAX_H = 700;
@@ -8,6 +9,8 @@ const MIN_BOX_PX = 6; // kéo nhỏ hơn mức này (trên màn hình) coi như 
 
 const BOX_COLOR = "#ff3b30";
 const DRAFT_COLOR = "#ffcc00";
+const HOVER_COLOR = "#ffaa00";
+const SELECT_COLOR = "#00ff00";
 
 function toDisplayRect([x, y, w, h], sx, sy) {
   return [x * sx, y * sy, w * sx, h * sy];
@@ -16,13 +19,16 @@ function toDisplayRect([x, y, w, h], sx, sy) {
 /** Canvas thuần vẽ ảnh + box xe, tự co giãn theo maxW/maxH do component cha đo
  * được (kích thước thật của khung chứa) — không tự fetch/lưu dữ liệu, chỉ báo
  * thay đổi qua onAddBox/onRemoveBoxAt để cha xử lý lưu. */
-export default function BoxCanvas({ imageId, boxes, tool, locked, disabled, maxW, maxH, onAddBox, onRemoveBoxAt }) {
+const BoxCanvas = memo(function BoxCanvas({ imageId, boxes, tool, locked, disabled, maxW, maxH, onAddBox, onRemoveBoxAt, onBoxSelect }) {
   const canvasRef = useRef(null);
   const imgObjRef = useRef(null);
   const scaleRef = useRef([1, 1]);
   const dragStartRef = useRef(null);
   const draftRef = useRef(null);
   const boxesRef = useRef(boxes);
+  const [hoveredBoxIndex, setHoveredBoxIndex] = useState(-1);
+  const [selectedBoxIndex, setSelectedBoxIndex] = useState(-1);
+  
   boxesRef.current = boxes;
   const maxWRef = useRef(maxW);
   maxWRef.current = maxW;
@@ -35,15 +41,30 @@ export default function BoxCanvas({ imageId, boxes, tool, locked, disabled, maxW
     if (!canvas || !img || !img.complete) return;
     const ctx = canvas.getContext("2d");
     ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.imageSmoothingEnabled = true;
     ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
 
     const [sx, sy] = scaleRef.current;
-    ctx.lineWidth = 2;
-    ctx.strokeStyle = BOX_COLOR;
-    for (const box of boxesRef.current) {
+    
+    // Vẽ tất cả boxes với highlight
+    for (let i = 0; i < boxesRef.current.length; i++) {
+      const box = boxesRef.current[i];
       const [x, y, w, h] = toDisplayRect(box, sx, sy);
+      
+      if (i === selectedBoxIndex) {
+        ctx.lineWidth = 4;
+        ctx.strokeStyle = SELECT_COLOR; // Xanh cho selected
+      } else if (i === hoveredBoxIndex) {
+        ctx.lineWidth = 3;
+        ctx.strokeStyle = HOVER_COLOR; // Vàng cho hover
+      } else {
+        ctx.lineWidth = 2;
+        ctx.strokeStyle = BOX_COLOR; // Đỏ bình thường
+      }
+      
       ctx.strokeRect(x, y, w, h);
     }
+    
     if (draftRef.current) {
       const [x0, y0, x1, y1] = draftRef.current;
       ctx.strokeStyle = DRAFT_COLOR;
@@ -66,17 +87,34 @@ export default function BoxCanvas({ imageId, boxes, tool, locked, disabled, maxW
     canvas.height = dispH;
   }
 
-  // Nạp ảnh mới
+  // Nạp ảnh mới (dùng cache client để tránh tải lại từng lần chuyển ảnh)
   useEffect(() => {
     if (!imageId) return;
-    const img = new Image();
-    img.onload = () => {
-      imgObjRef.current = img;
-      resizeToFit();
-      redraw();
-    };
-    img.src = `/api/drive/image/${imageId}`;
+    let ignored = false;
+    const src = `/api/drive/image/${imageId}`;
+    preloadImage(src);
+    getCachedImage(src)
+      .then((img) => {
+        if (!img || ignored) return;
+        imgObjRef.current = img;
+        resizeToFit();
+        redraw();
+      })
+      .catch(() => {
+        if (ignored) return;
+        const fallback = new Image();
+        fallback.onload = () => {
+          if (ignored) return;
+          imgObjRef.current = fallback;
+          resizeToFit();
+          redraw();
+        };
+        fallback.src = src;
+      });
     draftRef.current = null;
+    return () => {
+      ignored = true;
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [imageId]);
 
@@ -90,7 +128,13 @@ export default function BoxCanvas({ imageId, boxes, tool, locked, disabled, maxW
   useEffect(() => {
     redraw();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [boxes]);
+  }, [boxes, hoveredBoxIndex, selectedBoxIndex]);
+
+  useEffect(() => {
+    if (tool !== "eraser") return;
+    const id = window.requestAnimationFrame(() => redraw());
+    return () => window.cancelAnimationFrame(id);
+  }, [tool, selectedBoxIndex, hoveredBoxIndex, boxes]);
 
   function canvasPoint(e) {
     const canvas = canvasRef.current;
@@ -102,6 +146,22 @@ export default function BoxCanvas({ imageId, boxes, tool, locked, disabled, maxW
     return [(e.clientX - rect.left) * cssToCanvasX, (e.clientY - rect.top) * cssToCanvasY];
   }
 
+  // Tìm box nào ở vị trí (px, py) trên canvas
+  function findBoxAt(px, py) {
+    const [sx, sy] = scaleRef.current;
+    const ox = px / sx;
+    const oy = py / sy;
+    
+    // Duyệt từ cuối lên để lấy box ở trên cùng
+    for (let i = boxesRef.current.length - 1; i >= 0; i--) {
+      const [x, y, w, h] = boxesRef.current[i];
+      if (ox >= x && ox <= x + w && oy >= y && oy <= y + h) {
+        return i;
+      }
+    }
+    return -1;
+  }
+
   function handleMouseDown(e) {
     if (locked || disabled || !imageId) return;
     const [x, y] = canvasPoint(e);
@@ -109,16 +169,32 @@ export default function BoxCanvas({ imageId, boxes, tool, locked, disabled, maxW
       dragStartRef.current = [x, y];
       draftRef.current = [x, y, x, y];
     } else if (tool === "eraser") {
-      eraseAt(x, y);
+      const boxIdx = findBoxAt(x, y);
+      if (boxIdx >= 0) {
+        if (onBoxSelect) onBoxSelect(boxIdx);
+      } else if (onBoxSelect) {
+        onBoxSelect(-1);
+      }
     }
   }
 
   function handleMouseMove(e) {
-    if (tool !== "pen" || !dragStartRef.current) return;
+    if (!imageId) return;
     const [x, y] = canvasPoint(e);
+    if (tool === "eraser") {
+      const boxIdx = findBoxAt(x, y);
+      setHoveredBoxIndex((prev) => (prev === boxIdx ? prev : boxIdx));
+    } else if (hoveredBoxIndex !== -1) {
+      setHoveredBoxIndex(-1);
+    }
+    if (tool !== "pen" || !dragStartRef.current) return;
     const [x0, y0] = dragStartRef.current;
     draftRef.current = [x0, y0, x, y];
     redraw();
+  }
+
+  function handleMouseLeave() {
+    setHoveredBoxIndex(-1);
   }
 
   function handleMouseUp(e) {
@@ -169,6 +245,9 @@ export default function BoxCanvas({ imageId, boxes, tool, locked, disabled, maxW
       onMouseDown={handleMouseDown}
       onMouseMove={handleMouseMove}
       onMouseUp={handleMouseUp}
+      onMouseLeave={handleMouseLeave}
     />
   );
-}
+});
+
+export default BoxCanvas;
