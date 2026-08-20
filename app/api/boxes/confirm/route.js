@@ -1,13 +1,13 @@
 import { NextResponse } from "next/server";
 import { getServerSession } from "next-auth/next";
 import { authOptions } from "@/lib/authOptions";
-import { setDensityLabel } from "@/lib/sheets";
+import { setBoxConfirmed } from "@/lib/sheets";
 
 export async function POST(request) {
   const session = await getServerSession(authOptions);
 
-  const { date, items, labeledBy } = await request.json();
-  if (!date || !Array.isArray(items) || items.length === 0) {
+  const { date, filename, fileId, labeledBy, confirmed } = await request.json();
+  if (!date || !filename || typeof confirmed !== "boolean") {
     return NextResponse.json({ error: "invalid body" }, { status: 400 });
   }
 
@@ -16,9 +16,6 @@ export async function POST(request) {
     return NextResponse.json({ error: "missing labeledBy (user not authenticated)" }, { status: 400 });
   }
 
-  for (const it of items) {
-    await setDensityLabel(date, it.filename, it.fileId, it.labelId, it.labelName, it.note || "", author);
-  }
-
-  return NextResponse.json({ ok: true, count: items.length });
+  await setBoxConfirmed(date, filename, fileId, author, confirmed);
+  return NextResponse.json({ ok: true });
 }

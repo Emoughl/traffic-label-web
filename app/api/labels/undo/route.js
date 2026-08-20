@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { getServerSession } from "next-auth/next";
 import { authOptions } from "@/lib/authOptions";
-import { removeLabelRows } from "@/lib/sheets";
+import { clearDensityLabel } from "@/lib/sheets";
 
 export async function POST(request) {
   const session = await getServerSession(authOptions);
@@ -14,6 +14,6 @@ export async function POST(request) {
     return NextResponse.json({ error: "invalid body" }, { status: 400 });
   }
 
-  await removeLabelRows(date, filenames);
+  await clearDensityLabel(date, filenames);
   return NextResponse.json({ ok: true });
 }
