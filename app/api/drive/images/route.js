@@ -31,7 +31,14 @@ export async function GET(request) {
     ]);
 
     return NextResponse.json({
-      images: images.map((i) => ({ id: i.id, name: i.name })),
+      images: images.map((i) => ({
+        id: i.id,
+        name: i.name,
+        // URL thumbnail trực tiếp từ Google CDN (không proxy qua server)
+        thumbnailUrl: i.thumbnailLink
+          ? i.thumbnailLink.replace(/=s\d+$/, "=s200")
+          : null,
+      })),
       labeled: Array.from(labeled),
     });
   } catch (err) {

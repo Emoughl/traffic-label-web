@@ -18,17 +18,23 @@ function toDisplayRect([x, y, w, h], sx, sy) {
 
 /** Canvas thuần vẽ ảnh + box xe, tự co giãn theo maxW/maxH do component cha đo
  * được (kích thước thật của khung chứa) — không tự fetch/lưu dữ liệu, chỉ báo
- * thay đổi qua onAddBox/onRemoveBoxAt để cha xử lý lưu. */
-const BoxCanvas = memo(function BoxCanvas({ imageId, boxes, tool, locked, disabled, maxW, maxH, onAddBox, onRemoveBoxAt, onBoxSelect }) {
+ * thay đổi qua onAddBox/onRemoveBoxAt để cha xử lý lưu.
+ *
+ * Two-stage loading: khi chuyển ảnh, hiển thị thumbnail ngay lập tức trên canvas
+ * (instant feedback) rồi load full-res ở background, swap khi xong → không giật lag.
+ */
+const BoxCanvas = memo(function BoxCanvas({ imageId, thumbnailSrc, boxes, tool, locked, disabled, maxW, maxH, onAddBox, onRemoveBoxAt, onBoxSelect }) {
   const canvasRef = useRef(null);
-  const imgObjRef = useRef(null);
+  const imgObjRef = useRef(null);       // ảnh đang hiển thị (thumb hoặc full)
+  const fullImgRef = useRef(null);      // ảnh full-res (khi đã load xong)
   const scaleRef = useRef([1, 1]);
   const dragStartRef = useRef(null);
   const draftRef = useRef(null);
   const boxesRef = useRef(boxes);
   const [hoveredBoxIndex, setHoveredBoxIndex] = useState(-1);
   const [selectedBoxIndex, setSelectedBoxIndex] = useState(-1);
-  
+  const currentImageIdRef = useRef(imageId);
+
   boxesRef.current = boxes;
   const maxWRef = useRef(maxW);
   maxWRef.current = maxW;
@@ -45,12 +51,12 @@ const BoxCanvas = memo(function BoxCanvas({ imageId, boxes, tool, locked, disabl
     ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
 
     const [sx, sy] = scaleRef.current;
-    
+
     // Vẽ tất cả boxes với highlight
     for (let i = 0; i < boxesRef.current.length; i++) {
       const box = boxesRef.current[i];
       const [x, y, w, h] = toDisplayRect(box, sx, sy);
-      
+
       if (i === selectedBoxIndex) {
         ctx.lineWidth = 4;
         ctx.strokeStyle = SELECT_COLOR; // Xanh cho selected
@@ -61,10 +67,10 @@ const BoxCanvas = memo(function BoxCanvas({ imageId, boxes, tool, locked, disabl
         ctx.lineWidth = 2;
         ctx.strokeStyle = BOX_COLOR; // Đỏ bình thường
       }
-      
+
       ctx.strokeRect(x, y, w, h);
     }
-    
+
     if (draftRef.current) {
       const [x0, y0, x1, y1] = draftRef.current;
       ctx.strokeStyle = DRAFT_COLOR;
@@ -74,49 +80,95 @@ const BoxCanvas = memo(function BoxCanvas({ imageId, boxes, tool, locked, disabl
     }
   }
 
-  function resizeToFit() {
-    const img = imgObjRef.current;
+  function resizeToFit(img) {
+    const target = img || imgObjRef.current;
     const canvas = canvasRef.current;
-    if (!img || !img.complete || !canvas) return;
-    // Lấp đầy đúng khung khả dụng (không giữ tỉ lệ ảnh gốc) — theo yêu cầu bỏ
-    // hẳn viền đen letterbox, ảnh sẽ kéo giãn nhẹ cho vừa khít khung.
+    if (!target || !target.complete || !canvas) return;
     const dispW = Math.max(1, Math.round(maxWRef.current || DEFAULT_MAX_W));
     const dispH = Math.max(1, Math.round(maxHRef.current || DEFAULT_MAX_H));
-    scaleRef.current = [dispW / img.naturalWidth, dispH / img.naturalHeight];
+    scaleRef.current = [dispW / target.naturalWidth, dispH / target.naturalHeight];
     canvas.width = dispW;
     canvas.height = dispH;
   }
 
-  // Nạp ảnh mới (dùng cache client để tránh tải lại từng lần chuyển ảnh)
+  // ---- TWO-STAGE IMAGE LOADING ----
+  // Khi imageId thay đổi:
+  //   1. Hiển thị thumbnail ngay lập tức (từ cache hoặc tải nhanh)
+  //   2. Tải full-res ở background, swap khi xong
   useEffect(() => {
     if (!imageId) return;
-    let ignored = false;
-    const src = `/api/drive/image/${imageId}`;
-    preloadImage(src);
-    getCachedImage(src)
-      .then((img) => {
-        if (!img || ignored) return;
-        imgObjRef.current = img;
-        resizeToFit();
+    let cancelled = false;
+    currentImageIdRef.current = imageId;
+
+    const fullSrc = `/api/drive/image/${imageId}`;
+
+    // --- Bước 0: Nếu full-res đã có sẵn trong cache → hiển thị ngay, xong ---
+    const cachedFull = getCachedImage(fullSrc);
+    // getCachedImage trả Promise, nhưng nếu đã cache thì resolve đồng bộ qua Promise.resolve
+    // Ta kiểm tra cache trực tiếp qua preloadImage (trả img nếu có, null nếu chưa)
+    const existingFull = preloadImage(fullSrc);
+    if (existingFull && existingFull.complete) {
+      imgObjRef.current = existingFull;
+      fullImgRef.current = existingFull;
+      resizeToFit(existingFull);
+      redraw();
+      return () => { cancelled = true; };
+    }
+
+    // --- Bước 1: Hiển thị thumbnail ngay (nếu có) ---
+    if (thumbnailSrc) {
+      const existingThumb = preloadImage(thumbnailSrc);
+      if (existingThumb && existingThumb.complete) {
+        // Thumbnail đã cache → vẽ ngay
+        imgObjRef.current = existingThumb;
+        fullImgRef.current = null;
+        resizeToFit(existingThumb);
+        redraw();
+      } else {
+        // Tải thumbnail
+        getCachedImage(thumbnailSrc)
+          .then((thumbImg) => {
+            if (cancelled || currentImageIdRef.current !== imageId) return;
+            // Chỉ dùng thumb nếu full chưa load xong
+            if (!fullImgRef.current || !fullImgRef.current.complete) {
+              imgObjRef.current = thumbImg;
+              resizeToFit(thumbImg);
+              redraw();
+            }
+          })
+          .catch(() => {});
+      }
+    }
+
+    // --- Bước 2: Tải full-res ở background ---
+    getCachedImage(fullSrc)
+      .then((fullImg) => {
+        if (cancelled || currentImageIdRef.current !== imageId) return;
+        imgObjRef.current = fullImg;
+        fullImgRef.current = fullImg;
+        resizeToFit(fullImg);
         redraw();
       })
       .catch(() => {
-        if (ignored) return;
+        if (cancelled || currentImageIdRef.current !== imageId) return;
+        // Fallback: tải trực tiếp
         const fallback = new Image();
         fallback.onload = () => {
-          if (ignored) return;
+          if (cancelled || currentImageIdRef.current !== imageId) return;
           imgObjRef.current = fallback;
-          resizeToFit();
+          fullImgRef.current = fallback;
+          resizeToFit(fallback);
           redraw();
         };
-        fallback.src = src;
+        fallback.src = fullSrc;
       });
+
     draftRef.current = null;
     return () => {
-      ignored = true;
+      cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [imageId]);
+  }, [imageId, thumbnailSrc]);
 
   // Khung chứa đổi kích thước (vd resize cửa sổ) — co giãn lại canvas, giữ nguyên ảnh đã nạp
   useEffect(() => {
@@ -151,7 +203,7 @@ const BoxCanvas = memo(function BoxCanvas({ imageId, boxes, tool, locked, disabl
     const [sx, sy] = scaleRef.current;
     const ox = px / sx;
     const oy = py / sy;
-    
+
     // Duyệt từ cuối lên để lấy box ở trên cùng
     for (let i = boxesRef.current.length - 1; i >= 0; i--) {
       const [x, y, w, h] = boxesRef.current[i];

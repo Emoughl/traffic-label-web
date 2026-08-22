@@ -1,9 +1,63 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSession, signIn } from "next-auth/react";
 import { useRouter } from "next/navigation";
 import BoxCanvas from "./BoxCanvas";
+import { preloadNeighborFullImages } from "@/lib/imageCache";
+
+// --- Lazy thumbnail: chỉ load ảnh khi scroll vào viewport ---
+const LazyThumbnail = memo(function LazyThumbnail({ img, isActive, onClick, label }) {
+  const ref = useRef(null);
+  const [visible, setVisible] = useState(false);
+  const [useFallback, setUseFallback] = useState(false);
+
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const io = new IntersectionObserver(
+      ([entry]) => { if (entry.isIntersecting) { setVisible(true); io.disconnect(); } },
+      { rootMargin: "200px" } // preload 200px trước khi vào viewport
+    );
+    io.observe(el);
+    return () => io.disconnect();
+  }, []);
+
+  // Ưu tiên thumbnailUrl từ Google CDN, fallback proxy nếu lỗi hoặc không có
+  const proxySrc = `/api/drive/thumbnail/${img.id}`;
+  const src = useFallback || !img.thumbnailUrl ? proxySrc : img.thumbnailUrl;
+
+  return (
+    <button
+      ref={ref}
+      onClick={onClick}
+      style={{
+        width: 82, minWidth: 82, padding: 4,
+        border: isActive ? "2px solid #4da3ff" : "1px solid #ddd",
+        borderRadius: 4,
+        background: isActive ? "#eaf3ff" : "#fff",
+        cursor: "pointer",
+        display: "flex", flexDirection: "column", alignItems: "center", gap: 4,
+      }}
+      title={img.name}
+    >
+      {visible ? (
+        <img
+          src={src}
+          alt={img.name}
+          loading="lazy"
+          onError={() => { if (!useFallback && img.thumbnailUrl) setUseFallback(true); }}
+          style={{ width: 72, height: 44, objectFit: "cover", borderRadius: 3, background: "#111", display: "block" }}
+        />
+      ) : (
+        <div style={{ width: 72, height: 44, borderRadius: 3, background: "#ddd", display: "block" }} />
+      )}
+      <span style={{ fontSize: 10, lineHeight: 1.2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", width: "100%" }}>
+        {label}
+      </span>
+    </button>
+  );
+});
 
 const CLASSES = [
   { id: 0, name: "Bình thường", nameEn: "Normal", criteria: "Xe di chuyển bình thường, không phải giảm tốc nhiều, khoảng cách xe hợp lý" },
@@ -136,19 +190,21 @@ export default function LabelToolPage({ params }) {
 
   const preloadQueueRef = useRef(new Set());
 
-  function preloadImageById(fileId) {
-    if (!fileId || typeof window === "undefined") return;
-    if (preloadQueueRef.current.has(fileId)) return;
-    preloadQueueRef.current.add(fileId);
+  function preloadImageByData(imgData) {
+    if (!imgData || typeof window === "undefined") return;
+    const key = imgData.id;
+    if (preloadQueueRef.current.has(key)) return;
+    preloadQueueRef.current.add(key);
 
-    const thumbSrc = `/api/drive/thumbnail/${fileId}`;
+    // Ưu tiên Google CDN thumbnail, fallback proxy
+    const thumbSrc = imgData.thumbnailUrl || `/api/drive/thumbnail/${imgData.id}`;
     const img = new Image();
     img.decoding = "async";
     img.loading = "eager";
     img.src = thumbSrc;
 
     setTimeout(() => {
-      preloadQueueRef.current.delete(fileId);
+      preloadQueueRef.current.delete(key);
     }, 6000);
   }
 
@@ -159,6 +215,7 @@ export default function LabelToolPage({ params }) {
   useEffect(() => {
     if (!images.length) return;
     let rafId = requestAnimationFrame(() => {
+      // Preload thumbnails for ±4 neighbors (thumbnail strip)
       const neighbors = [];
       for (let offset = 1; offset <= 4; offset++) {
         const prev = index - offset;
@@ -167,8 +224,11 @@ export default function LabelToolPage({ params }) {
         if (next < images.length) neighbors.push(next);
       }
       neighbors.push(index);
-      const unique = [...new Set(neighbors)].map((i) => images[i]?.id).filter(Boolean);
-      unique.forEach((id) => preloadImageById(id));
+      const unique = [...new Set(neighbors)].map((i) => images[i]).filter(Boolean);
+      unique.forEach((imgData) => preloadImageByData(imgData));
+
+      // Preload FULL-RESOLUTION images for ±3 neighbors (eliminates lag on switch)
+      preloadNeighborFullImages(images, index, 3);
     });
     return () => cancelAnimationFrame(rafId);
   }, [index, images]);
@@ -484,42 +544,13 @@ export default function LabelToolPage({ params }) {
       <div style={{ display: "flex", flexDirection: "column", gap: 8, flex: 1, minHeight: 0 }}>
         <div style={{ display: "flex", gap: 6, overflowX: "auto", paddingBottom: 4, borderBottom: "1px solid #ddd", flexShrink: 0 }}>
           {images.map((img, i) => (
-            <button
+            <LazyThumbnail
               key={img.id}
-              onClick={() => setIndex(i)}
-              disabled={loading}
-              style={{
-                width: 82,
-                minWidth: 82,
-                padding: 4,
-                border: i === index ? "2px solid #4da3ff" : "1px solid #ddd",
-                borderRadius: 4,
-                background: i === index ? "#eaf3ff" : "#fff",
-                cursor: "pointer",
-                display: "flex",
-                flexDirection: "column",
-                alignItems: "center",
-                gap: 4,
-              }}
-              title={img.name}
-            >
-              <img
-                src={`/api/drive/thumbnail/${img.id}`}
-                alt={img.name}
-                loading="lazy"
-                style={{
-                  width: 72,
-                  height: 44,
-                  objectFit: "cover",
-                  borderRadius: 3,
-                  background: "#111",
-                  display: "block",
-                }}
-              />
-              <span style={{ fontSize: 10, lineHeight: 1.2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", width: "100%" }}>
-                {i + 1}
-              </span>
-            </button>
+              img={img}
+              isActive={i === index}
+              onClick={() => !loading && setIndex(i)}
+              label={i + 1}
+            />
           ))}
         </div>
 
@@ -544,6 +575,7 @@ export default function LabelToolPage({ params }) {
             ) : (
               <BoxCanvas
                 imageId={current.id}
+                thumbnailSrc={current.thumbnailUrl || `/api/drive/thumbnail/${current.id}`}
                 boxes={currentBoxes}
                 tool={tool}
                 locked={isBoxLocked}
