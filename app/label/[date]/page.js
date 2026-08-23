@@ -314,7 +314,9 @@ export default function LabelToolPage({ params }) {
 
   async function deleteCurrentImage() {
     if (!current || busy) return;
-    const confirmDel = window.confirm(`Bạn có chắc muốn xóa ảnh "${current.name}" khỏi Google Drive?`);
+    const confirmDel = window.confirm(
+      `Bạn có chắc muốn xóa ảnh "${current.name}"?\nẢnh sẽ được chuyển vào thư mục Deleted/${date}`
+    );
     if (!confirmDel) return;
 
     setBusy(true);
@@ -322,13 +324,15 @@ export default function LabelToolPage({ params }) {
       const res = await fetch("/api/drive/delete", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ fileIds: [current.id] }),
+        body: JSON.stringify({ fileIds: [current.id], date }),
       });
       if (!res.ok) {
-        alert("Lỗi khi xóa ảnh, thử lại.");
+        const err = await res.json().catch(() => ({}));
+        alert(`Lỗi khi xóa ảnh: ${err.error || "thử lại."}`);
         return;
       }
       setImages((prev) => prev.filter((img) => img.id !== current.id));
+      setMsg(`Đã chuyển "${current.name}" vào Deleted/${date}.`);
     } finally {
       setBusy(false);
     }
