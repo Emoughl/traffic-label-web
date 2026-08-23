@@ -14,12 +14,17 @@ export async function GET(request) {
     return NextResponse.json({ error: "missing date" }, { status: 400 });
   }
 
-  const [boxes, confirmed] = await Promise.all([
-    getVehicleBoxes(date),
-    getBoxConfirmedFilenames(date),
-  ]);
+  try {
+    const [boxes, confirmed] = await Promise.all([
+      getVehicleBoxes(date),
+      getBoxConfirmedFilenames(date),
+    ]);
 
-  return NextResponse.json({ boxes, confirmed: Array.from(confirmed) });
+    return NextResponse.json({ boxes, confirmed: Array.from(confirmed) });
+  } catch (err) {
+    console.error("[GET /api/boxes] error:", err.message);
+    return NextResponse.json({ error: err.message }, { status: 500 });
+  }
 }
 
 export async function POST(request) {

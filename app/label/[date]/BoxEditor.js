@@ -276,6 +276,7 @@ export default function BoxEditor({ date, images, labeledBy }) {
       else if (e.key === "ArrowRight") showNext();
       else if (e.key.toLowerCase() === "p") setTool("pen");
       else if (e.key.toLowerCase() === "x") setTool("eraser");
+      else if (e.key === "Enter") setTool("Confirm");
       else if (e.key === "Delete" && selectedBoxIndex >= 0) {
         removeBoxIndex(selectedBoxIndex);
         setSelectedBoxIndex(-1);
@@ -351,6 +352,9 @@ export default function BoxEditor({ date, images, labeledBy }) {
           <button style={toolBtnStyle(tool === "eraser")} onClick={() => setTool("eraser")} disabled={isLocked}>
             🧹 Xoá box (X)
           </button>
+          <button style={toolBtnStyle(tool === "Confirm")} onClick={() => setTool("Confirm")} disabled={busy || isLocked}>
+             Xác nhận (Enter)
+          </button>
         </div>
 
         <canvas
@@ -370,10 +374,9 @@ export default function BoxEditor({ date, images, labeledBy }) {
               : "Rê chuột qua khung để highlight, click để chọn khung cần xoá."
           } {msg}
         </div>
-
         <div style={{ display: "flex", gap: 8, margin: "8px 0", flexWrap: "wrap" }}>
-          <button onClick={() => setConfirm(true)} disabled={busy || isLocked}>
-            Xác nhận
+          <button style={toolBtnStyle(tool === "Confirm")} onClick={() => setTool("Confirm")} disabled={busy || isLocked}>
+            Xác nhận (Enter)
           </button>
           <button onClick={() => setConfirm(false)} disabled={busy || !isLocked}>
             Đánh label lại

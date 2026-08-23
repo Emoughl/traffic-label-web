@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { getServerSession } from "next-auth/next";
 import { authOptions } from "@/lib/authOptions";
 import { findFolderIdByDate, listImagesInFolder, invalidateCachesForDate } from "@/lib/drive";
-import { getLabeledFilenames } from "@/lib/sheets";
+import { getLabeledFilenames, getDeletedFilenames } from "@/lib/sheets";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -25,13 +25,17 @@ export async function GET(request) {
       return NextResponse.json({ error: "folder not found" }, { status: 404 });
     }
 
-    const [images, labeled] = await Promise.all([
+    const [images, labeled, deleted] = await Promise.all([
       listImagesInFolder(folderId),
-      getLabeledFilenames(date),
+      getLabeledFilenames(date).catch(() => new Set()),
+      getDeletedFilenames(date).catch(() => new Set()),
     ]);
 
+    // Lọc bỏ những ảnh đã bị đánh dấu DELETED
+    const activeImages = images.filter((img) => !deleted.has(img.name));
+
     return NextResponse.json({
-      images: images.map((i) => ({
+      images: activeImages.map((i) => ({
         id: i.id,
         name: i.name,
         // URL thumbnail trực tiếp từ Google CDN (không proxy qua server)
@@ -39,7 +43,7 @@ export async function GET(request) {
           ? i.thumbnailLink.replace(/=s\d+$/, "=s200")
           : null,
       })),
-      labeled: Array.from(labeled),
+      labeled: Array.from(labeled).filter((name) => !deleted.has(name)),
     });
   } catch (err) {
     console.error("/api/drive/images error:", err);

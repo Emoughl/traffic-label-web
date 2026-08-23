@@ -148,9 +148,19 @@ export default function LabelToolPage({ params }) {
     setLoadingBoxes(true);
     try {
       const res = await fetch(`/api/boxes?date=${encodeURIComponent(date)}`);
+      if (!res.ok) {
+        console.warn("[loadBoxData] API error", res.status);
+        setBoxesMap({});
+        setConfirmedSet(new Set());
+        return;
+      }
       const data = await res.json();
       setBoxesMap(data.boxes || {});
       setConfirmedSet(new Set(data.confirmed || []));
+    } catch (err) {
+      console.warn("[loadBoxData] fetch/parse error:", err.message);
+      setBoxesMap({});
+      setConfirmedSet(new Set());
     } finally {
       setLoadingBoxes(false);
     }
@@ -339,7 +349,12 @@ export default function LabelToolPage({ params }) {
       const res = await fetch("/api/drive/delete", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ fileIds: [current.id], date, labeledBy: chosenName }),
+        body: JSON.stringify({
+          fileIds: [current.id],
+          filenames: [current.name],
+          date,
+          labeledBy: chosenName,
+        }),
       });
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
@@ -347,7 +362,7 @@ export default function LabelToolPage({ params }) {
         return;
       }
       setImages((prev) => prev.filter((img) => img.id !== current.id));
-      setMsg(`Đã chuyển "${current.name}" vào Deleted/${date}.`);
+      setMsg(`Đã xóa "${current.name}".`);
     } catch (err) {
       alert(`Lỗi khi xóa ảnh: ${err.message || "thử lại."}`);
     } finally {
@@ -447,6 +462,12 @@ export default function LabelToolPage({ params }) {
     saveBoxesForCurrent(next);
     setSelectedBoxIndex(-1);
   }
+  function updateBoxAt(i, newBox) {
+    if (i < 0 || i >= currentBoxes.length) return;
+    const next = currentBoxes.slice();
+    next[i] = newBox;
+    saveBoxesForCurrent(next);
+  }
 
   function removeSelectedBox() {
     if (selectedBoxIndex < 0) return;
@@ -513,12 +534,16 @@ export default function LabelToolPage({ params }) {
         setNoteTime((v) => (v === TIME_OPTIONS[1] ? null : TIME_OPTIONS[1]));
       } else if (lkey === "n") {
         setNoteTime(null);
+      } else if (key === "Enter") {
+        e.preventDefault();
+        if (!isBoxLocked) setBoxConfirm(true);
+        setSelectedBoxIndex(-1);
       }
     }
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [busy, history, images, current, chosenName, tool, selectedBoxIndex]);
+  }, [busy, history, images, current, chosenName, tool, selectedBoxIndex, isBoxLocked]);
 
   if (status === "loading") return <p style={{ padding: 20 }}>Đang tải...</p>;
 
@@ -605,6 +630,7 @@ export default function LabelToolPage({ params }) {
                 maxH={canvasBox.h}
                 onAddBox={addBox}
                 onRemoveBoxAt={removeBoxAt}
+                onUpdateBox={updateBoxAt}
                 onBoxSelect={setSelectedBoxIndex}
                 selectedBoxIndex={selectedBoxIndex}
               />
