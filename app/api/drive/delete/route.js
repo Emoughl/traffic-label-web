@@ -5,11 +5,14 @@ import { moveFilesToDeleted } from "@/lib/drive";
 
 export async function POST(request) {
   const session = await getServerSession(authOptions);
-  if (!session) {
+  const body = await request.json().catch(() => ({}));
+  const { fileIds, date, labeledBy } = body;
+
+  const author = session?.user?.email || (labeledBy && String(labeledBy).trim()) || "";
+  if (!author && !session) {
     return NextResponse.json({ error: "unauthorized" }, { status: 401 });
   }
 
-  const { fileIds, date } = await request.json();
   if (!Array.isArray(fileIds) || fileIds.length === 0) {
     return NextResponse.json({ error: "fileIds required" }, { status: 400 });
   }
@@ -23,7 +26,7 @@ export async function POST(request) {
   } catch (err) {
     console.error("[delete] Lỗi khi chuyển file vào Deleted:", err);
     return NextResponse.json(
-      { error: err.message || "Lỗi không xác định" },
+      { error: err.message || "Lỗi không xác định khi xóa ảnh" },
       { status: 500 }
     );
   }

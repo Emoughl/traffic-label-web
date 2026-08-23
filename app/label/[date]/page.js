@@ -283,30 +283,45 @@ export default function LabelToolPage({ params }) {
   }
 
   async function undoLast() {
-    if (history.length === 0) {
+    let targetFilename = null;
+    let isFromHistory = false;
+
+    if (history.length > 0) {
+      const last = history[history.length - 1];
+      targetFilename = last.filename;
+      isFromHistory = true;
+    } else if (current && labeledSet.has(current.name)) {
+      targetFilename = current.name;
+    } else {
       alert("Không còn thao tác gán mật độ nào để hoàn tác.");
       return;
     }
-    const last = history[history.length - 1];
+
     setBusy(true);
     try {
       const res = await fetch("/api/labels/undo", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ date, filenames: [last.filename] }),
+        body: JSON.stringify({ date, filenames: [targetFilename], labeledBy: chosenName }),
       });
       if (!res.ok) {
-        alert("Lỗi khi hoàn tác, thử lại.");
+        const err = await res.json().catch(() => ({}));
+        alert(`Lỗi khi hoàn tác: ${err.error || "thử lại."}`);
         return;
       }
       setLabeledSet((prev) => {
         const next = new Set(prev);
-        next.delete(last.filename);
+        next.delete(targetFilename);
         return next;
       });
-      setHistory((prev) => prev.slice(0, -1));
-      const idx = images.findIndex((img) => img.name === last.filename);
-      if (idx !== -1) setIndex(idx);
+      if (isFromHistory) {
+        setHistory((prev) => prev.slice(0, -1));
+        const idx = images.findIndex((img) => img.name === targetFilename);
+        if (idx !== -1) setIndex(idx);
+      }
+      setMsg(`Đã huỷ nhãn của "${targetFilename}".`);
+    } catch (err) {
+      alert(`Lỗi khi hoàn tác: ${err.message || "thử lại."}`);
     } finally {
       setBusy(false);
     }
@@ -324,7 +339,7 @@ export default function LabelToolPage({ params }) {
       const res = await fetch("/api/drive/delete", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ fileIds: [current.id], date }),
+        body: JSON.stringify({ fileIds: [current.id], date, labeledBy: chosenName }),
       });
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
@@ -333,6 +348,8 @@ export default function LabelToolPage({ params }) {
       }
       setImages((prev) => prev.filter((img) => img.id !== current.id));
       setMsg(`Đã chuyển "${current.name}" vào Deleted/${date}.`);
+    } catch (err) {
+      alert(`Lỗi khi xóa ảnh: ${err.message || "thử lại."}`);
     } finally {
       setBusy(false);
     }
