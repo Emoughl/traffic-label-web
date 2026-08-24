@@ -94,6 +94,7 @@ export default function LabelToolPage({ params }) {
   const [boxesMap, setBoxesMap] = useState({}); // {filename: [[x,y,w,h],...]}
   const [confirmedSet, setConfirmedSet] = useState(new Set()); // filename đã Xác nhận box (khoá)
   const [loadingBoxes, setLoadingBoxes] = useState(true);
+  const [filterTab, setFilterTab] = useState("all"); // "all" | "todo" | "done"
   const [tool, setTool] = useState("pen"); // "pen" (vẽ) | "edit" (chỉnh sửa) | "eraser" (xoá)
   const [selectedBoxIndex, setSelectedBoxIndex] = useState(-1); // box được select để sửa/xóa
 
@@ -198,6 +199,38 @@ export default function LabelToolPage({ params }) {
   const isDensityDone = current ? labeledSet.has(current.name) : false;
   const currentBoxes = useMemo(() => (current ? boxesMap[current.name] || [] : []), [current, boxesMap]);
 
+  // --- Lọc thumbnail theo tab: Tất cả / Chưa gán nhãn / Đã gán nhãn ---
+  // "Đã gán nhãn" = vừa có nhãn mật độ, vừa đã Xác nhận box (khớp với bộ đếm
+  // ở trang chọn ngày).
+  const isImageDone = useCallback(
+    (name) => labeledSet.has(name) && confirmedSet.has(name),
+    [labeledSet, confirmedSet]
+  );
+
+  // Mỗi phần tử = { img, i } với i = index trong mảng `images` gốc
+  const visibleImages = useMemo(() => {
+    const all = images.map((img, i) => ({ img, i }));
+    if (filterTab === "done") return all.filter(({ img }) => isImageDone(img.name));
+    if (filterTab === "todo") return all.filter(({ img }) => !isImageDone(img.name));
+    return all;
+  }, [images, filterTab, isImageDone]);
+
+  const doneCount = useMemo(
+    () => images.reduce((n, img) => n + (isImageDone(img.name) ? 1 : 0), 0),
+    [images, isImageDone]
+  );
+
+  // Vị trí của ảnh hiện tại trong danh sách đang hiển thị (-1 = không nằm trong tab)
+  const visiblePos = useMemo(() => visibleImages.findIndex((v) => v.i === index), [visibleImages, index]);
+
+  // Đổi tab mà ảnh đang xem không thuộc tab đó → nhảy tới ảnh đầu tiên của tab
+  useEffect(() => {
+    if (!visibleImages.length) return;
+    if (visibleImages.some((v) => v.i === index)) return;
+    setIndex(visibleImages[0].i);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filterTab]);
+
   const preloadQueueRef = useRef(new Set());
 
   function preloadImageByData(imgData) {
@@ -223,37 +256,63 @@ export default function LabelToolPage({ params }) {
   }, [current?.id]);
 
   useEffect(() => {
-    if (!images.length) return;
+    if (!visibleImages.length) return;
+    const pos = visiblePos;
     let rafId = requestAnimationFrame(() => {
-      // Preload thumbnails for ±4 neighbors (thumbnail strip)
+      // Preload thumbnail của ±4 ảnh kế bên TRONG DANH SÁCH ĐANG HIỂN THỊ
       const neighbors = [];
-      for (let offset = 1; offset <= 4; offset++) {
-        const prev = index - offset;
-        const next = index + offset;
-        if (prev >= 0) neighbors.push(prev);
-        if (next < images.length) neighbors.push(next);
+      if (pos >= 0) {
+        for (let offset = 1; offset <= 4; offset++) {
+          if (pos - offset >= 0) neighbors.push(pos - offset);
+          if (pos + offset < visibleImages.length) neighbors.push(pos + offset);
+        }
+        neighbors.push(pos);
       }
-      neighbors.push(index);
-      const unique = [...new Set(neighbors)].map((i) => images[i]).filter(Boolean);
+      const unique = [...new Set(neighbors)].map((p) => visibleImages[p]?.img).filter(Boolean);
       unique.forEach((imgData) => preloadImageByData(imgData));
 
-      // Preload FULL-RESOLUTION images for ±3 neighbors (eliminates lag on switch)
-      preloadNeighborFullImages(images, index, 3);
+      // Preload ảnh full-res ±3 để chuyển ảnh không bị khựng
+      if (pos >= 0) {
+        preloadNeighborFullImages(
+          visibleImages.map((v) => v.img),
+          pos,
+          3
+        );
+      }
     });
     return () => cancelAnimationFrame(rafId);
-  }, [index, images]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [visiblePos, visibleImages]);
 
   function currentNoteText() {
     return noteTime ? TIME_EN[noteTime] : "";
   }
 
+  /** Đi tới ảnh cách ảnh hiện tại `delta` bước, tính theo danh sách đang lọc. */
+  function goVisible(delta) {
+    if (busy || !visibleImages.length) return;
+    const pos = visiblePos;
+    if (pos === -1) {
+      // Ảnh hiện tại không thuộc tab → nhảy tới ảnh gần nhất theo hướng đi
+      if (delta > 0) {
+        const nxt = visibleImages.find((v) => v.i > index);
+        setIndex((nxt || visibleImages[visibleImages.length - 1]).i);
+      } else {
+        const prevs = visibleImages.filter((v) => v.i < index);
+        setIndex((prevs.length ? prevs[prevs.length - 1] : visibleImages[0]).i);
+      }
+      return;
+    }
+    const nextPos = pos + delta;
+    if (nextPos < 0 || nextPos >= visibleImages.length) return;
+    setIndex(visibleImages[nextPos].i);
+  }
+
   function showPrev() {
-    if (busy || index === 0) return;
-    setIndex((i) => Math.max(0, i - 1));
+    goVisible(-1);
   }
   function showNext() {
-    if (busy || index >= images.length - 1) return;
-    setIndex((i) => Math.min(images.length - 1, i + 1));
+    goVisible(1);
   }
 
   async function assignLabel(cls) {
@@ -277,11 +336,11 @@ export default function LabelToolPage({ params }) {
       });
       if (!res.ok) throw new Error("Lỗi khi lưu nhãn");
       setMsg(`Đã gán "${cls.name}" cho ${current.name}.`);
-      // tự chuyển sang ảnh kế tiếp chưa gán mật độ (nếu còn)
-      const nextIdx = images.findIndex(
-        (img, i) => i > indexRef.current && !prevLabeledSet.has(img.name) && img.name !== current.name
+      // tự chuyển sang ảnh kế tiếp chưa gán mật độ (trong tab đang xem)
+      const nextItem = visibleImages.find(
+        (v) => v.i > indexRef.current && !prevLabeledSet.has(v.img.name) && v.img.name !== current.name
       );
-      if (nextIdx !== -1) setIndex(nextIdx);
+      if (nextItem) setIndex(nextItem.i);
       else showNext();
     } catch (error) {
       setLabeledSet(prevLabeledSet);
@@ -545,7 +604,7 @@ export default function LabelToolPage({ params }) {
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [busy, history, images, current, chosenName, tool, selectedBoxIndex, isBoxLocked]);
+  }, [busy, history, images, current, chosenName, tool, selectedBoxIndex, isBoxLocked, filterTab, visibleImages, visiblePos]);
 
   if (status === "loading") return <p style={{ padding: 20 }}>Đang tải...</p>;
 
@@ -560,6 +619,18 @@ export default function LabelToolPage({ params }) {
     cursor: "pointer",
     fontSize: 12,
     display: "inline-block",
+  });
+
+  const tabBtnStyle = (active) => ({
+    padding: "4px 12px",
+    borderRadius: "4px 4px 0 0",
+    border: "1px solid #bbb",
+    borderBottom: active ? "1px solid #4da3ff" : "1px solid #bbb",
+    background: active ? "#4da3ff" : "#f0f0f0",
+    color: active ? "#fff" : "#333",
+    fontWeight: active ? "bold" : "normal",
+    cursor: "pointer",
+    fontSize: 12,
   });
 
   const toolBtnStyle = (active) => ({
@@ -590,8 +661,27 @@ export default function LabelToolPage({ params }) {
       </div>
 
       <div style={{ display: "flex", flexDirection: "column", gap: 8, flex: 1, minHeight: 0 }}>
+        <div style={{ display: "flex", gap: 4, alignItems: "center", flexShrink: 0, fontSize: 12 }}>
+          {[
+            { key: "all", label: `Tất cả (${images.length})` },
+            { key: "todo", label: `Chưa gán nhãn (${images.length - doneCount})` },
+            { key: "done", label: `Đã gán nhãn (${doneCount})` },
+          ].map((t) => (
+            <button key={t.key} onClick={() => setFilterTab(t.key)} style={tabBtnStyle(filterTab === t.key)}>
+              {t.label}
+            </button>
+          ))}
+          <span style={{ color: "#888", marginLeft: 4 }}>
+            {visibleImages.length === 0
+              ? "— tab này chưa có ảnh nào"
+              : visiblePos >= 0
+                ? `đang xem ${visiblePos + 1}/${visibleImages.length} trong tab`
+                : "ảnh đang xem không thuộc tab này"}
+          </span>
+        </div>
+
         <div style={{ display: "flex", gap: 6, overflowX: "auto", paddingBottom: 4, borderBottom: "1px solid #ddd", flexShrink: 0 }}>
-          {images.map((img, i) => (
+          {visibleImages.map(({ img, i }) => (
             <LazyThumbnail
               key={img.id}
               img={img}
@@ -688,8 +778,8 @@ export default function LabelToolPage({ params }) {
               </div>
 
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 4, marginBottom: 8 }}>
-                <button onClick={showPrev} disabled={index === 0}>{"<< Back"}</button>
-                <button onClick={showNext} disabled={index === images.length - 1}>{"Next >>"}</button>
+                <button onClick={showPrev} disabled={busy || visiblePos === 0 || !visibleImages.length}>{"<< Back"}</button>
+                <button onClick={showNext} disabled={busy || visiblePos === visibleImages.length - 1 || !visibleImages.length}>{"Next >>"}</button>
                 <button onClick={undoLast} disabled={busy}>Hoàn tác (Ctrl+Z)</button>
                 <button onClick={deleteCurrentImage} disabled={busy}>Xóa ảnh (Del)</button>
               </div>
