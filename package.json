@@ -5,7 +5,9 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
-    "start": "next start"
+    "start": "next start",
+    "convert:boxes": "node --env-file=.env.local scripts/convert-boxes-format.mjs",
+    "convert:boxes:apply": "node --env-file=.env.local scripts/convert-boxes-format.mjs --apply"
   },
   "dependencies": {
     "next": "14.2.5",
