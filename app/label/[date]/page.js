@@ -94,8 +94,8 @@ export default function LabelToolPage({ params }) {
   const [boxesMap, setBoxesMap] = useState({}); // {filename: [[x,y,w,h],...]}
   const [confirmedSet, setConfirmedSet] = useState(new Set()); // filename đã Xác nhận box (khoá)
   const [loadingBoxes, setLoadingBoxes] = useState(true);
-  const [tool, setTool] = useState("pen"); // "pen" | "eraser"
-  const [selectedBoxIndex, setSelectedBoxIndex] = useState(-1); // box được select để xóa
+  const [tool, setTool] = useState("pen"); // "pen" (vẽ) | "edit" (chỉnh sửa) | "eraser" (xoá)
+  const [selectedBoxIndex, setSelectedBoxIndex] = useState(-1); // box được select để sửa/xóa
 
   // --- Kích thước khung ảnh khả dụng (đo thật, để canvas to hết cỡ không chừa khoảng trống) ---
   const canvasWrapRef = useRef(null);
@@ -517,7 +517,7 @@ export default function LabelToolPage({ params }) {
       } else if ((e.ctrlKey || e.metaKey) && lkey === "z") {
         e.preventDefault();
         undoLast();
-      } else if (tool === "eraser" && (key === "Delete" || key === "Backspace") && selectedBoxIndex >= 0) {
+      } else if ((tool === "eraser" || tool === "edit") && (key === "Delete" || key === "Backspace") && selectedBoxIndex >= 0) {
         removeSelectedBox();
       } else if (key === "Delete" || key === "Backspace") {
         deleteCurrentImage();
@@ -526,11 +526,13 @@ export default function LabelToolPage({ params }) {
         loadBoxData();
       } else if (lkey === "p") {
         setTool("pen");
+      } else if (lkey === "e") {
+        setTool("edit");
       } else if (lkey === "x") {
         setTool("eraser");
       } else if (lkey === "m") {
         setNoteTime((v) => (v === TIME_OPTIONS[0] ? null : TIME_OPTIONS[0]));
-      } else if (lkey === "e") {
+      } else if (lkey === "t") {
         setNoteTime((v) => (v === TIME_OPTIONS[1] ? null : TIME_OPTIONS[1]));
       } else if (lkey === "n") {
         setNoteTime(null);
@@ -670,7 +672,7 @@ export default function LabelToolPage({ params }) {
                 <div style={{ fontWeight: "bold", marginBottom: 2 }}>Ghi chú mật độ:</div>
                 {TIME_OPTIONS.map((t) => (
                   <span key={t} style={chipStyle(noteTime === t)} onClick={() => setNoteTime((v) => (v === t ? null : t))}>
-                    {t} ({t === TIME_OPTIONS[0] ? "M" : "E"})
+                    {t} ({t === TIME_OPTIONS[0] ? "M" : "T"})
                   </span>
                 ))}
                 <span style={chipStyle(false)} onClick={() => setNoteTime(null)}>Xoá (N)</span>
@@ -696,6 +698,7 @@ export default function LabelToolPage({ params }) {
 
               <div style={{ marginBottom: 6 }}>
                 <button style={toolBtnStyle(tool === "pen")} onClick={() => setTool("pen")} disabled={isBoxLocked}>🖊️ Vẽ (P)</button>
+                <button style={toolBtnStyle(tool === "edit")} onClick={() => setTool("edit")} disabled={isBoxLocked}>✏️ Chỉnh sửa (E)</button>
                 <button style={toolBtnStyle(tool === "eraser")} onClick={() => setTool("eraser")} disabled={isBoxLocked}>🧹 Xoá (X)</button>
               </div>
 
@@ -710,7 +713,15 @@ export default function LabelToolPage({ params }) {
               </div>
 
               <div style={{ fontSize: 12, color: "#666", marginBottom: 6 }}>
-                {selectedBoxIndex >= 0 ? `Đã chọn xe #${selectedBoxIndex + 1}. Nhấn Delete hoặc nút trên để xóa.` : `Đã vẽ ${currentBoxes.length} xe. ${msg}`}
+                {tool === "pen"
+                  ? `Chế độ Vẽ: kéo chuột để tạo box mới. Đã vẽ ${currentBoxes.length} xe. ${msg}`
+                  : tool === "edit"
+                    ? selectedBoxIndex >= 0
+                      ? `Chế độ Chỉnh sửa — xe #${selectedBoxIndex + 1}: kéo cạnh/góc để phóng to thu nhỏ, kéo giữa box để dời. Delete để xoá.`
+                      : "Chế độ Chỉnh sửa: click vào một box để chọn, rồi kéo cạnh/góc (resize) hoặc kéo giữa box (di chuyển)."
+                    : selectedBoxIndex >= 0
+                      ? `Đã chọn xe #${selectedBoxIndex + 1}. Nhấn Delete hoặc nút trên để xóa.`
+                      : `Chế độ Xoá: click vào box cần xoá. Đã vẽ ${currentBoxes.length} xe. ${msg}`}
               </div>
 
               {currentBoxes.length > 0 && (
@@ -724,7 +735,7 @@ export default function LabelToolPage({ params }) {
                   </thead>
                   <tbody>
                     {currentBoxes.map((b, i) => (
-                      <tr key={i} onClick={() => { setTool("eraser"); setSelectedBoxIndex(i); }} style={{ background: i === selectedBoxIndex ? "#00ff0033" : "transparent", cursor: isBoxLocked ? "default" : "pointer" }}>
+                      <tr key={i} onClick={() => { if (!isBoxLocked) setTool("edit"); setSelectedBoxIndex(i); }} style={{ background: i === selectedBoxIndex ? "#00ff0033" : "transparent", cursor: isBoxLocked ? "default" : "pointer" }}>
                         <td style={{ border: "1px solid #ddd", padding: "2px 4px" }}>{i + 1}</td>
                         {b.map((v, j) => (
                           <td key={j} style={{ border: "1px solid #ddd", padding: "2px 4px" }}>{v}</td>

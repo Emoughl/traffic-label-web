@@ -53,13 +53,19 @@ function detectEdge(px, py, box, sx, sy, threshold) {
   return { edges, cursor };
 }
 
-/** Canvas thuần vẽ ảnh + box xe, hỗ trợ vẽ mới + resize box bằng kéo cạnh/góc.
+/** Canvas thuần vẽ ảnh + box xe.
+ *
+ * 3 chế độ (prop `tool`), tách bạch hẳn để không vướng nhau khi thao tác:
+ *   - "pen"    : CHỈ vẽ box mới (kéo chuột), không đụng tới box cũ.
+ *   - "edit"   : CHỈ chỉnh sửa box có sẵn — click chọn, kéo cạnh/góc để resize,
+ *                kéo bên trong để di chuyển cả box. Không tạo box mới.
+ *   - "eraser" : click chọn box để xoá.
  *
  * Props:
  *   onAddBox(box)        – thêm box mới
  *   onRemoveBoxAt(i)     – xóa box tại index i
- *   onUpdateBox(i, box)  – cập nhật box tại index i (dùng cho resize)
- *   onBoxSelect(i)       – chọn box (eraser mode)
+ *   onUpdateBox(i, box)  – cập nhật box tại index i (resize / di chuyển)
+ *   onBoxSelect(i)       – chọn box (edit / eraser mode)
  *   selectedBoxIndex     – index box đang được chọn từ cha
  */
 const BoxCanvas = memo(function BoxCanvas({
@@ -91,6 +97,8 @@ const BoxCanvas = memo(function BoxCanvas({
 
   // Resize state
   const resizeRef = useRef(null); // { boxIndex, edges, startBox, startPoint }
+  // Move state (kéo cả box trong chế độ "edit")
+  const moveRef = useRef(null); // { boxIndex, startBox, startPoint, moved }
 
   boxesRef.current = boxes;
   const maxWRef = useRef(maxW);
@@ -128,8 +136,8 @@ const BoxCanvas = memo(function BoxCanvas({
 
       ctx.strokeRect(x, y, w, h);
 
-      // Vẽ resize handles cho box được chọn (chỉ khi pen mode và không khoá)
-      if (i === activeSelected && tool === "pen" && !locked) {
+      // Vẽ resize handles cho box được chọn (chỉ ở chế độ Chỉnh sửa, không khoá)
+      if (i === activeSelected && tool === "edit" && !locked) {
         const handleSize = 6;
         ctx.fillStyle = RESIZE_HANDLE_COLOR;
         ctx.strokeStyle = BOX_COLOR;
@@ -236,6 +244,7 @@ const BoxCanvas = memo(function BoxCanvas({
 
     draftRef.current = null;
     resizeRef.current = null;
+    moveRef.current = null;
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [imageId, thumbnailSrc]);
@@ -252,10 +261,21 @@ const BoxCanvas = memo(function BoxCanvas({
   }, [boxes, hoveredBoxIndex, selectedBoxIndex, parentSelectedBoxIndex]);
 
   useEffect(() => {
-    if (tool !== "eraser") return;
     const id = window.requestAnimationFrame(() => redraw());
     return () => window.cancelAnimationFrame(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tool, selectedBoxIndex, parentSelectedBoxIndex, hoveredBoxIndex, boxes]);
+
+  // Đổi công cụ → huỷ mọi thao tác kéo đang dang dở, trả con trỏ về mặc định
+  useEffect(() => {
+    dragStartRef.current = null;
+    draftRef.current = null;
+    resizeRef.current = null;
+    moveRef.current = null;
+    setHoveredBoxIndex(-1);
+    setCursorStyle(tool === "pen" ? "crosshair" : "default");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tool]);
 
   function canvasPoint(e) {
     const canvas = canvasRef.current;
@@ -307,7 +327,11 @@ const BoxCanvas = memo(function BoxCanvas({
     const [px, py] = canvasPoint(e);
 
     if (tool === "pen") {
-      // Kiểm tra resize trước (nếu gần cạnh box)
+      // Chế độ Vẽ: luôn luôn vẽ box mới, không bao giờ resize/di chuyển box cũ
+      dragStartRef.current = [px, py];
+      draftRef.current = [px, py, px, py];
+    } else if (tool === "edit") {
+      // Chế độ Chỉnh sửa: kéo cạnh/góc = resize, kéo trong lòng box = di chuyển
       const resizeTarget = findResizeTarget(px, py);
       if (resizeTarget && onUpdateBox) {
         const box = boxesRef.current[resizeTarget.boxIndex];
@@ -322,11 +346,22 @@ const BoxCanvas = memo(function BoxCanvas({
         return;
       }
 
-      // Không gần cạnh → bỏ chọn box cũ + bắt đầu vẽ box mới
-      setSelectedBoxIndex(-1);
-      if (onBoxSelect) onBoxSelect(-1);
-      dragStartRef.current = [px, py];
-      draftRef.current = [px, py, px, py];
+      const boxIdx = findBoxAt(px, py);
+      if (boxIdx >= 0) {
+        if (onUpdateBox) {
+          moveRef.current = {
+            boxIndex: boxIdx,
+            startBox: [...boxesRef.current[boxIdx]],
+            startPoint: [px, py],
+            moved: false,
+          };
+        }
+        setSelectedBoxIndex(boxIdx);
+        if (onBoxSelect) onBoxSelect(boxIdx);
+      } else {
+        setSelectedBoxIndex(-1);
+        if (onBoxSelect) onBoxSelect(-1);
+      }
     } else if (tool === "eraser") {
       const boxIdx = findBoxAt(px, py);
       if (boxIdx >= 0) {
@@ -376,22 +411,52 @@ const BoxCanvas = memo(function BoxCanvas({
       return;
     }
 
-    // Tool eraser: hover highlight
-    if (tool === "eraser") {
+    // Đang di chuyển cả box (chế độ Chỉnh sửa)
+    if (moveRef.current) {
+      const { boxIndex, startBox, startPoint } = moveRef.current;
+      const [sx, sy] = scaleRef.current;
+      const dx = (px - startPoint[0]) / sx;
+      const dy = (py - startPoint[1]) / sy;
+      if (Math.abs(px - startPoint[0]) > 1 || Math.abs(py - startPoint[1]) > 1) {
+        moveRef.current.moved = true;
+      }
+
+      const canvas = canvasRef.current;
+      const imgW = canvas ? canvas.width / sx : Infinity;
+      const imgH = canvas ? canvas.height / sy : Infinity;
+      const [bx, by, bw, bh] = startBox;
+      const nx = Math.min(Math.max(0, bx + dx), Math.max(0, imgW - bw));
+      const ny = Math.min(Math.max(0, by + dy), Math.max(0, imgH - bh));
+
+      const newBox = [Math.round(nx), Math.round(ny), bw, bh];
+      boxesRef.current = boxesRef.current.map((b, i) => (i === boxIndex ? newBox : b));
+      redraw();
+      return;
+    }
+
+    // Hover highlight: chế độ Xoá và Chỉnh sửa
+    if (tool === "eraser" || tool === "edit") {
       const boxIdx = findBoxAt(px, py);
       setHoveredBoxIndex((prev) => (prev === boxIdx ? prev : boxIdx));
     } else if (hoveredBoxIndex !== -1) {
       setHoveredBoxIndex(-1);
     }
 
-    // Tool pen: cập nhật cursor khi gần cạnh box
-    if (tool === "pen" && !dragStartRef.current) {
+    // Cursor theo từng chế độ
+    if (tool === "pen") {
+      if (cursorStyle !== "crosshair") setCursorStyle("crosshair");
+    } else if (tool === "edit") {
       const resizeTarget = findResizeTarget(px, py);
       if (resizeTarget) {
         setCursorStyle(resizeTarget.cursor);
+      } else if (findBoxAt(px, py) >= 0) {
+        setCursorStyle("move");
       } else {
-        setCursorStyle("crosshair");
+        setCursorStyle("default");
       }
+    } else if (tool === "eraser") {
+      const overBox = findBoxAt(px, py) >= 0;
+      setCursorStyle(overBox ? "pointer" : "default");
     }
 
     // Đang vẽ box mới
@@ -404,7 +469,7 @@ const BoxCanvas = memo(function BoxCanvas({
 
   function handleMouseLeave() {
     setHoveredBoxIndex(-1);
-    setCursorStyle("crosshair");
+    setCursorStyle(tool === "pen" ? "crosshair" : "default");
   }
 
   function handleMouseUp(e) {
@@ -415,6 +480,20 @@ const BoxCanvas = memo(function BoxCanvas({
       resizeRef.current = null;
       if (onUpdateBox && finalBox) {
         onUpdateBox(boxIndex, finalBox);
+      }
+      return;
+    }
+
+    // Kết thúc di chuyển box
+    if (moveRef.current) {
+      const { boxIndex, moved } = moveRef.current;
+      const finalBox = boxesRef.current[boxIndex];
+      moveRef.current = null;
+      // Click nhẹ (không kéo) chỉ để chọn box, không cần lưu lại
+      if (moved && onUpdateBox && finalBox) {
+        onUpdateBox(boxIndex, finalBox);
+      } else {
+        redraw();
       }
       return;
     }
