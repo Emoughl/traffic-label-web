@@ -6,22 +6,16 @@ import { useRouter } from "next/navigation";
 import BoxCanvas from "./BoxCanvas";
 import { preloadNeighborFullImages } from "@/lib/imageCache";
 
-// --- Lazy thumbnail: chỉ load ảnh khi scroll vào viewport ---
-const LazyThumbnail = memo(function LazyThumbnail({ img, isActive, onClick, label }) {
-  const ref = useRef(null);
-  const [visible, setVisible] = useState(false);
-  const [useFallback, setUseFallback] = useState(false);
+// Bề rộng cố định của 1 ô thumbnail (kể cả khoảng cách) — dùng cho virtual list
+const THUMB_W = 82;
+const THUMB_GAP = 6;
+const THUMB_STRIDE = THUMB_W + THUMB_GAP;
+const THUMB_OVERSCAN = 8; // render dư 2 bên cho mượt khi cuộn
 
-  useEffect(() => {
-    const el = ref.current;
-    if (!el) return;
-    const io = new IntersectionObserver(
-      ([entry]) => { if (entry.isIntersecting) { setVisible(true); io.disconnect(); } },
-      { rootMargin: "200px" } // preload 200px trước khi vào viewport
-    );
-    io.observe(el);
-    return () => io.disconnect();
-  }, []);
+// --- Thumbnail: chỉ những ô đang lọt trong khung nhìn mới được render (xem
+// VirtualThumbStrip bên dưới), nên ở đây không cần IntersectionObserver nữa. ---
+const Thumbnail = memo(function Thumbnail({ img, isActive, onClick, label }) {
+  const [useFallback, setUseFallback] = useState(false);
 
   // Ưu tiên thumbnailUrl từ Google CDN, fallback proxy nếu lỗi hoặc không có
   const proxySrc = `/api/drive/thumbnail/${img.id}`;
@@ -29,10 +23,9 @@ const LazyThumbnail = memo(function LazyThumbnail({ img, isActive, onClick, labe
 
   return (
     <button
-      ref={ref}
       onClick={onClick}
       style={{
-        width: 82, minWidth: 82, padding: 4,
+        width: THUMB_W, minWidth: THUMB_W, boxSizing: "border-box", padding: 4,
         border: isActive ? "2px solid #4da3ff" : "1px solid #ddd",
         borderRadius: 4,
         background: isActive ? "#eaf3ff" : "#fff",
@@ -41,21 +34,90 @@ const LazyThumbnail = memo(function LazyThumbnail({ img, isActive, onClick, labe
       }}
       title={img.name}
     >
-      {visible ? (
-        <img
-          src={src}
-          alt={img.name}
-          loading="lazy"
-          onError={() => { if (!useFallback && img.thumbnailUrl) setUseFallback(true); }}
-          style={{ width: 72, height: 44, objectFit: "cover", borderRadius: 3, background: "#111", display: "block" }}
-        />
-      ) : (
-        <div style={{ width: 72, height: 44, borderRadius: 3, background: "#ddd", display: "block" }} />
-      )}
+      <img
+        src={src}
+        alt=""
+        loading="lazy"
+        decoding="async"
+        onError={() => { if (!useFallback && img.thumbnailUrl) setUseFallback(true); }}
+        style={{ width: 68, height: 42, objectFit: "cover", borderRadius: 3, background: "#111", display: "block" }}
+      />
       <span style={{ fontSize: 10, lineHeight: 1.2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", width: "100%" }}>
         {label}
       </span>
     </button>
+  );
+});
+
+/** Dải thumbnail dạng "virtual list": dù có 7000 ảnh thì DOM cũng chỉ giữ
+ * khoảng vài chục nút đang nhìn thấy. Hai div đệm 2 bên giữ đúng chiều dài
+ * thanh cuộn nên cảm giác cuộn không khác gì render hết. */
+const VirtualThumbStrip = memo(function VirtualThumbStrip({ items, activeIndex, activePos, onPick }) {
+  const scrollerRef = useRef(null);
+  const [range, setRange] = useState({ start: 0, end: 30 });
+
+  const recompute = useCallback(() => {
+    const el = scrollerRef.current;
+    if (!el) return;
+    const first = Math.floor(el.scrollLeft / THUMB_STRIDE);
+    const count = Math.ceil(el.clientWidth / THUMB_STRIDE);
+    const start = Math.max(0, first - THUMB_OVERSCAN);
+    const end = Math.min(items.length, first + count + THUMB_OVERSCAN);
+    setRange((prev) => (prev.start === start && prev.end === end ? prev : { start, end }));
+  }, [items.length]);
+
+  useEffect(() => {
+    recompute();
+    const el = scrollerRef.current;
+    if (!el) return;
+    let raf = null;
+    const onScroll = () => {
+      if (raf) return;
+      raf = requestAnimationFrame(() => { raf = null; recompute(); });
+    };
+    el.addEventListener("scroll", onScroll, { passive: true });
+    window.addEventListener("resize", onScroll);
+    return () => {
+      if (raf) cancelAnimationFrame(raf);
+      el.removeEventListener("scroll", onScroll);
+      window.removeEventListener("resize", onScroll);
+    };
+  }, [recompute]);
+
+  // Ảnh đang xem luôn được kéo vào tầm nhìn (kể cả khi chuyển bằng phím)
+  useEffect(() => {
+    const el = scrollerRef.current;
+    if (!el || activePos < 0) return;
+    const left = activePos * THUMB_STRIDE;
+    const right = left + THUMB_W;
+    if (left < el.scrollLeft + 4) {
+      el.scrollLeft = Math.max(0, left - THUMB_STRIDE * 2);
+    } else if (right > el.scrollLeft + el.clientWidth - 4) {
+      el.scrollLeft = right - el.clientWidth + THUMB_STRIDE * 2;
+    }
+  }, [activePos, items.length]);
+
+  const visible = items.slice(range.start, range.end);
+
+  return (
+    <div
+      ref={scrollerRef}
+      style={{ display: "flex", overflowX: "auto", paddingBottom: 4, borderBottom: "1px solid #ddd", flexShrink: 0 }}
+    >
+      <div style={{ width: range.start * THUMB_STRIDE, flexShrink: 0 }} />
+      <div style={{ display: "flex", gap: THUMB_GAP, flexShrink: 0 }}>
+        {visible.map(({ img, i }) => (
+          <Thumbnail
+            key={img.id}
+            img={img}
+            isActive={i === activeIndex}
+            onClick={() => onPick(i)}
+            label={i + 1}
+          />
+        ))}
+      </div>
+      <div style={{ width: Math.max(0, (items.length - range.end) * THUMB_STRIDE), flexShrink: 0 }} />
+    </div>
   );
 });
 
@@ -86,6 +148,7 @@ export default function LabelToolPage({ params }) {
   const [displayName, setDisplayName] = useState("");
   const [history, setHistory] = useState([]); // undo cho gán mật độ, mỗi item = {filename}
   const [busy, setBusy] = useState(false);
+  const [savingBoxes, setSavingBoxes] = useState(false); // chỉ để hiển thị, KHÔNG khoá thao tác
   const [msg, setMsg] = useState("");
   const [searchStartTime, setSearchStartTime] = useState(""); // "12:00" format
   const [searchEndTime, setSearchEndTime] = useState(""); // "14:00" format
@@ -94,7 +157,7 @@ export default function LabelToolPage({ params }) {
   const [boxesMap, setBoxesMap] = useState({}); // {filename: [[x,y,w,h],...]}
   const [confirmedSet, setConfirmedSet] = useState(new Set()); // filename đã Xác nhận box (khoá)
   const [loadingBoxes, setLoadingBoxes] = useState(true);
-  const [filterTab, setFilterTab] = useState("all"); // "all" | "todo" | "done"
+  const [filterTab, setFilterTab] = useState("todo"); // "todo" | "done"
   const [tool, setTool] = useState("pen"); // "pen" (vẽ) | "edit" (chỉnh sửa) | "eraser" (xoá)
   const [selectedBoxIndex, setSelectedBoxIndex] = useState(-1); // box được select để sửa/xóa
 
@@ -199,7 +262,23 @@ export default function LabelToolPage({ params }) {
   const isDensityDone = current ? labeledSet.has(current.name) : false;
   const currentBoxes = useMemo(() => (current ? boxesMap[current.name] || [] : []), [current, boxesMap]);
 
-  // --- Lọc thumbnail theo tab: Tất cả / Chưa gán nhãn / Đã gán nhãn ---
+  // Ref "gương" của state, để các callback truyền xuống BoxCanvas giữ nguyên
+  // identity giữa các lần render (BoxCanvas là memo → không phải render lại).
+  const boxesMapRef = useRef(boxesMap);
+  boxesMapRef.current = boxesMap;
+  const currentRef = useRef(current);
+  currentRef.current = current;
+  const chosenNameRef = useRef(chosenName);
+  chosenNameRef.current = chosenName;
+  const loadingRef = useRef(loading);
+  loadingRef.current = loading;
+
+  const pickIndex = useCallback((i) => {
+    if (loadingRef.current) return;
+    setIndex(i);
+  }, []);
+
+  // --- Lọc thumbnail theo tab: Chưa gán nhãn / Đã gán nhãn ---
   // "Đã gán nhãn" = vừa có nhãn mật độ, vừa đã Xác nhận box (khớp với bộ đếm
   // ở trang chọn ngày).
   const isImageDone = useCallback(
@@ -209,10 +288,12 @@ export default function LabelToolPage({ params }) {
 
   // Mỗi phần tử = { img, i } với i = index trong mảng `images` gốc
   const visibleImages = useMemo(() => {
-    const all = images.map((img, i) => ({ img, i }));
-    if (filterTab === "done") return all.filter(({ img }) => isImageDone(img.name));
-    if (filterTab === "todo") return all.filter(({ img }) => !isImageDone(img.name));
-    return all;
+    const out = [];
+    for (let i = 0; i < images.length; i++) {
+      const done = isImageDone(images[i].name);
+      if (filterTab === "done" ? done : !done) out.push({ img: images[i], i });
+    }
+    return out;
   }, [images, filterTab, isImageDone]);
 
   const doneCount = useMemo(
@@ -490,43 +571,105 @@ export default function LabelToolPage({ params }) {
     setMsg(`✓ Tìm thấy ảnh lúc ${getTimeFromFilename(images[foundIdx].name)}`);
   }
 
-  async function saveBoxesForCurrent(nextBoxes) {
-    if (!current) return;
-    const prev = boxesMap[current.name] || [];
-    setBoxesMap((m) => ({ ...m, [current.name]: nextBoxes }));
-    setBusy(true);
-    try {
-      const res = await fetch("/api/boxes", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ date, filename: current.name, fileId: current.id, boxes: nextBoxes, labeledBy: chosenName }),
-      });
-      if (!res.ok) throw new Error("save failed");
-      setMsg(`Đã lưu ${nextBoxes.length} box xe cho ${current.name}.`);
-    } catch (err) {
-      setBoxesMap((m) => ({ ...m, [current.name]: prev }));
-      setMsg("Lỗi khi lưu box, thử lại.");
-    } finally {
-      setBusy(false);
-    }
-  }
+  // ---- Lưu box: chạy nền, không khoá giao diện ----------------------------
+  // Trước đây mỗi lần vẽ/sửa 1 box đều bật `busy` → canvas bị disable cho tới
+  // khi Google Sheets trả lời, nên vẽ liên tục rất khựng. Giờ state cập nhật
+  // ngay (optimistic), còn request được xếp hàng: mỗi ảnh chỉ giữ bản mới nhất
+  // và tối đa 1 request bay cùng lúc.
+  const saveQueueRef = useRef(new Map()); // filename -> { fileId, boxes, prev }
+  const savingRef = useRef(false);
 
-  function addBox(box) {
-    saveBoxesForCurrent([...currentBoxes, box]);
-  }
-  function removeBoxAt(i) {
-    if (i < 0 || i >= currentBoxes.length) return;
-    const next = currentBoxes.slice();
-    next.splice(i, 1);
-    saveBoxesForCurrent(next);
-    setSelectedBoxIndex(-1);
-  }
-  function updateBoxAt(i, newBox) {
-    if (i < 0 || i >= currentBoxes.length) return;
-    const next = currentBoxes.slice();
-    next[i] = newBox;
-    saveBoxesForCurrent(next);
-  }
+  const flushSaveQueue = useCallback(async () => {
+    if (savingRef.current) return;
+    savingRef.current = true;
+    setSavingBoxes(true);
+    try {
+      while (saveQueueRef.current.size > 0) {
+        const [filename, job] = saveQueueRef.current.entries().next().value;
+        saveQueueRef.current.delete(filename);
+        try {
+          const res = await fetch("/api/boxes", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              date,
+              filename,
+              fileId: job.fileId,
+              boxes: job.boxes,
+              labeledBy: chosenNameRef.current,
+            }),
+          });
+          if (!res.ok) throw new Error("save failed");
+        } catch (err) {
+          // Trả lại trạng thái trước đó của đúng ảnh bị lỗi
+          setBoxesMap((m) => ({ ...m, [filename]: job.prev }));
+          setMsg(`Lỗi khi lưu box của ${filename}, thử lại.`);
+        }
+      }
+    } finally {
+      savingRef.current = false;
+      setSavingBoxes(false);
+    }
+  }, [date]);
+
+  const queueBoxSave = useCallback(
+    (img, nextBoxes) => {
+      if (!img) return;
+      const pending = saveQueueRef.current.get(img.name);
+      const prev = pending ? pending.prev : boxesMapRef.current[img.name] || [];
+      saveQueueRef.current.set(img.name, { fileId: img.id, boxes: nextBoxes, prev });
+      setBoxesMap((m) => ({ ...m, [img.name]: nextBoxes }));
+      flushSaveQueue();
+    },
+    [flushSaveQueue]
+  );
+
+  // Nhắc nếu đóng tab khi còn box chưa kịp lưu
+  useEffect(() => {
+    function onBeforeUnload(e) {
+      if (saveQueueRef.current.size === 0 && !savingRef.current) return;
+      e.preventDefault();
+      e.returnValue = "";
+    }
+    window.addEventListener("beforeunload", onBeforeUnload);
+    return () => window.removeEventListener("beforeunload", onBeforeUnload);
+  }, []);
+
+  const addBox = useCallback(
+    (box) => {
+      const img = currentRef.current;
+      if (!img) return;
+      queueBoxSave(img, [...(boxesMapRef.current[img.name] || []), box]);
+    },
+    [queueBoxSave]
+  );
+
+  const removeBoxAt = useCallback(
+    (i) => {
+      const img = currentRef.current;
+      if (!img) return;
+      const list = boxesMapRef.current[img.name] || [];
+      if (i < 0 || i >= list.length) return;
+      const next = list.slice();
+      next.splice(i, 1);
+      queueBoxSave(img, next);
+      setSelectedBoxIndex(-1);
+    },
+    [queueBoxSave]
+  );
+
+  const updateBoxAt = useCallback(
+    (i, newBox) => {
+      const img = currentRef.current;
+      if (!img) return;
+      const list = boxesMapRef.current[img.name] || [];
+      if (i < 0 || i >= list.length) return;
+      const next = list.slice();
+      next[i] = newBox;
+      queueBoxSave(img, next);
+    },
+    [queueBoxSave]
+  );
 
   function removeSelectedBox() {
     if (selectedBoxIndex < 0) return;
@@ -663,7 +806,6 @@ export default function LabelToolPage({ params }) {
       <div style={{ display: "flex", flexDirection: "column", gap: 8, flex: 1, minHeight: 0 }}>
         <div style={{ display: "flex", gap: 4, alignItems: "center", flexShrink: 0, fontSize: 12 }}>
           {[
-            { key: "all", label: `Tất cả (${images.length})` },
             { key: "todo", label: `Chưa gán nhãn (${images.length - doneCount})` },
             { key: "done", label: `Đã gán nhãn (${doneCount})` },
           ].map((t) => (
@@ -680,17 +822,12 @@ export default function LabelToolPage({ params }) {
           </span>
         </div>
 
-        <div style={{ display: "flex", gap: 6, overflowX: "auto", paddingBottom: 4, borderBottom: "1px solid #ddd", flexShrink: 0 }}>
-          {visibleImages.map(({ img, i }) => (
-            <LazyThumbnail
-              key={img.id}
-              img={img}
-              isActive={i === index}
-              onClick={() => !loading && setIndex(i)}
-              label={i + 1}
-            />
-          ))}
-        </div>
+        <VirtualThumbStrip
+          items={visibleImages}
+          activeIndex={index}
+          activePos={visiblePos}
+          onPick={pickIndex}
+        />
 
         <div style={{ display: "flex", gap: 8, flex: 1, minHeight: 0 }}>
           <div
@@ -804,7 +941,7 @@ export default function LabelToolPage({ params }) {
 
               <div style={{ fontSize: 12, color: "#666", marginBottom: 6 }}>
                 {tool === "pen"
-                  ? `Chế độ Vẽ: kéo chuột để tạo box mới. Đã vẽ ${currentBoxes.length} xe. ${msg}`
+                  ? `Chế độ Vẽ: kéo chuột để tạo box mới. Đã vẽ ${currentBoxes.length} xe. ${savingBoxes ? "(đang lưu…)" : msg}`
                   : tool === "edit"
                     ? selectedBoxIndex >= 0
                       ? `Chế độ Chỉnh sửa — xe #${selectedBoxIndex + 1}: kéo cạnh/góc để phóng to thu nhỏ, kéo giữa box để dời. Delete để xoá.`
