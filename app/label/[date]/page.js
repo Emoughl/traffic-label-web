@@ -148,7 +148,9 @@ export default function LabelToolPage({ params }) {
   const [noteTime, setNoteTime] = useState(null);
   const [useAuthName, setUseAuthName] = useState(false);
   const [displayName, setDisplayName] = useState("");
-  const [history, setHistory] = useState([]); // undo cho gán mật độ, mỗi item = {filename}
+  // Ngăn xếp hoàn tác dùng chung cho MỌI thao tác (nhãn mật độ, vẽ/sửa/xoá box,
+  // xác nhận box). Mỗi item lưu trạng thái TRƯỚC khi thao tác diễn ra.
+  const [undoStack, setUndoStack] = useState([]);
   const [busy, setBusy] = useState(false);
   const [savingBoxes, setSavingBoxes] = useState(false); // chỉ để hiển thị, KHÔNG khoá thao tác
   const [msg, setMsg] = useState("");
@@ -169,6 +171,8 @@ export default function LabelToolPage({ params }) {
 
   const indexRef = useRef(index);
   indexRef.current = index;
+  const imagesRef = useRef(images);
+  imagesRef.current = images;
 
   useEffect(() => {
     const el = canvasWrapRef.current;
@@ -277,6 +281,17 @@ export default function LabelToolPage({ params }) {
   chosenNameRef.current = chosenName;
   const loadingRef = useRef(loading);
   loadingRef.current = loading;
+
+  const UNDO_LIMIT = 100;
+  const pushUndo = useCallback((entry) => {
+    setUndoStack((prev) => [...prev, entry].slice(-UNDO_LIMIT));
+  }, []);
+
+  // Nhảy tới ảnh bị ảnh hưởng bởi thao tác vừa hoàn tác (nếu đang xem ảnh khác)
+  const focusFilename = useCallback((filename) => {
+    const idx = imagesRef.current.findIndex((im) => im.name === filename);
+    if (idx !== -1) setIndex(idx);
+  }, []);
 
   const pickIndex = useCallback((i) => {
     if (loadingRef.current) return;
@@ -417,15 +432,16 @@ export default function LabelToolPage({ params }) {
     const item = { filename: current.name, labelId: cls.id, labelName: cls.nameEn, note, fileId: current.id };
 
     const prevLabeledSet = new Set(labeledSet);
-    const prevHistory = history;
+    const prevStack = undoStack;
     const prevLabelsMap = labelsMap;
+    const prevLabel = labelsMap[current.name] || null;
 
     setLabeledSet((prev) => new Set(prev).add(current.name));
     setLabelsMap((prev) => ({
       ...prev,
       [current.name]: { labelId: String(cls.id), labelName: cls.nameEn, note },
     }));
-    setHistory((prev) => [...prev, { filename: current.name }]);
+    pushUndo({ type: "label", filename: current.name, fileId: current.id, prev: prevLabel });
 
     const chosen = chosenName;
     setBusy(true);
@@ -445,7 +461,7 @@ export default function LabelToolPage({ params }) {
       else showNext();
     } catch (error) {
       setLabeledSet(prevLabeledSet);
-      setHistory(prevHistory);
+      setUndoStack(prevStack);
       setLabelsMap(prevLabelsMap);
       setMsg("Lỗi khi lưu nhãn, thử lại.");
     } finally {
@@ -453,49 +469,87 @@ export default function LabelToolPage({ params }) {
     }
   }
 
-  async function undoLast() {
-    let targetFilename = null;
-    let isFromHistory = false;
-
-    if (history.length > 0) {
-      const last = history[history.length - 1];
-      targetFilename = last.filename;
-      isFromHistory = true;
-    } else if (current && labeledSet.has(current.name)) {
-      targetFilename = current.name;
+  /** Khôi phục nhãn mật độ về trạng thái `prev` (null = gỡ nhãn). */
+  async function restoreLabel(filename, fileId, prev) {
+    if (prev) {
+      const res = await fetch("/api/labels", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          date,
+          items: [{ filename, fileId, labelId: prev.labelId, labelName: prev.labelName, note: prev.note || "" }],
+          labeledBy: chosenName,
+        }),
+      });
+      if (!res.ok) throw new Error("Không khôi phục được nhãn cũ");
+      setLabeledSet((s2) => new Set(s2).add(filename));
+      setLabelsMap((m) => ({ ...m, [filename]: prev }));
     } else {
-      alert("Không còn thao tác gán mật độ nào để hoàn tác.");
+      const res = await fetch("/api/labels/undo", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ date, filenames: [filename], labeledBy: chosenName }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.error || "Không gỡ được nhãn");
+      }
+      setLabeledSet((s2) => {
+        const next = new Set(s2);
+        next.delete(filename);
+        return next;
+      });
+      setLabelsMap((m) => {
+        const next = { ...m };
+        delete next[filename];
+        return next;
+      });
+    }
+  }
+
+  /** Hoàn tác thao tác gần nhất — bất kể đó là gán nhãn, vẽ/sửa/xoá box hay xác nhận box. */
+  async function undoLast() {
+    if (busy) return;
+
+    const entry = undoStack[undoStack.length - 1];
+
+    // Không còn gì trong ngăn xếp (ví dụ vừa reload trang) → vẫn cho gỡ nhãn của ảnh đang xem
+    if (!entry) {
+      if (current && labeledSet.has(current.name)) {
+        setBusy(true);
+        try {
+          await restoreLabel(current.name, current.id, null);
+          setMsg(`Đã huỷ nhãn của "${current.name}".`);
+        } catch (err) {
+          alert(`Lỗi khi hoàn tác: ${err.message || "thử lại."}`);
+        } finally {
+          setBusy(false);
+        }
+      } else {
+        setMsg("Không còn thao tác nào để hoàn tác.");
+      }
       return;
     }
 
     setBusy(true);
     try {
-      const res = await fetch("/api/labels/undo", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ date, filenames: [targetFilename], labeledBy: chosenName }),
-      });
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({}));
-        alert(`Lỗi khi hoàn tác: ${err.error || "thử lại."}`);
-        return;
+      if (entry.type === "label") {
+        await restoreLabel(entry.filename, entry.fileId, entry.prev);
+        setMsg(
+          entry.prev
+            ? `Đã trả nhãn của "${entry.filename}" về [${entry.prev.labelId}].`
+            : `Đã huỷ nhãn của "${entry.filename}".`
+        );
+      } else if (entry.type === "boxes") {
+        queueBoxSave({ name: entry.filename, id: entry.fileId }, entry.prev, false);
+        setSelectedBoxIndex(-1);
+        setMsg(`Đã hoàn tác box của "${entry.filename}" (còn ${entry.prev.length} box).`);
+      } else if (entry.type === "confirm") {
+        await setBoxConfirm(entry.prev, { filename: entry.filename, fileId: entry.fileId }, false);
+        setMsg(entry.prev ? "Đã khoá lại box." : "Đã mở khoá box.");
       }
-      setLabeledSet((prev) => {
-        const next = new Set(prev);
-        next.delete(targetFilename);
-        return next;
-      });
-      setLabelsMap((prev) => {
-        const next = { ...prev };
-        delete next[targetFilename];
-        return next;
-      });
-      if (isFromHistory) {
-        setHistory((prev) => prev.slice(0, -1));
-        const idx = images.findIndex((img) => img.name === targetFilename);
-        if (idx !== -1) setIndex(idx);
-      }
-      setMsg(`Đã huỷ nhãn của "${targetFilename}".`);
+      setUndoStack((prev) => prev.slice(0, -1));
+      focusFilename(entry.filename);
     } catch (err) {
       alert(`Lỗi khi hoàn tác: ${err.message || "thử lại."}`);
     } finally {
@@ -528,7 +582,8 @@ export default function LabelToolPage({ params }) {
         return;
       }
       setImages((prev) => prev.filter((img) => img.id !== current.id));
-      setMsg(`Đã xóa "${current.name}".`);
+      setUndoStack((prev) => prev.filter((e) => e.filename !== current.name));
+      setMsg(`Đã xóa "${current.name}" (thao tác xoá ảnh không hoàn tác được).`);
     } catch (err) {
       alert(`Lỗi khi xóa ảnh: ${err.message || "thử lại."}`);
     } finally {
@@ -639,15 +694,24 @@ export default function LabelToolPage({ params }) {
   }, [date]);
 
   const queueBoxSave = useCallback(
-    (img, nextBoxes) => {
+    (img, nextBoxes, record = true) => {
       if (!img) return;
+      // Ghi trạng thái TRƯỚC khi đổi vào ngăn xếp hoàn tác
+      if (record) {
+        pushUndo({
+          type: "boxes",
+          filename: img.name,
+          fileId: img.id,
+          prev: boxesMapRef.current[img.name] || [],
+        });
+      }
       const pending = saveQueueRef.current.get(img.name);
       const prev = pending ? pending.prev : boxesMapRef.current[img.name] || [];
       saveQueueRef.current.set(img.name, { fileId: img.id, boxes: nextBoxes, prev });
       setBoxesMap((m) => ({ ...m, [img.name]: nextBoxes }));
       flushSaveQueue();
     },
-    [flushSaveQueue]
+    [flushSaveQueue, pushUndo]
   );
 
   // Nhắc nếu đóng tab khi còn box chưa kịp lưu
@@ -702,28 +766,36 @@ export default function LabelToolPage({ params }) {
     removeBoxAt(selectedBoxIndex);
   }
 
-  async function setBoxConfirm(value) {
-    if (!current || busy) return;
+  async function setBoxConfirm(value, target = null, record = true) {
+    const img = target || current;
+    if (!img) return;
+    if (!target && busy) return;
+
     const prevSet = new Set(confirmedSet);
+    if (record) {
+      pushUndo({ type: "confirm", filename: img.name, fileId: img.id, prev: prevSet.has(img.name) });
+    }
     setConfirmedSet((s) => {
       const next = new Set(s);
-      if (value) next.add(current.name);
-      else next.delete(current.name);
+      if (value) next.add(img.name);
+      else next.delete(img.name);
       return next;
     });
-    setBusy(true);
+    const manageBusy = !target;
+    if (manageBusy) setBusy(true);
     try {
       const res = await fetch("/api/boxes/confirm", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ date, filename: current.name, fileId: current.id, labeledBy: chosenName, confirmed: value }),
+        body: JSON.stringify({ date, filename: img.name, fileId: img.id, labeledBy: chosenName, confirmed: value }),
       });
       if (!res.ok) throw new Error("confirm failed");
     } catch (err) {
       setConfirmedSet(prevSet);
+      if (record) setUndoStack((prev) => prev.slice(0, -1));
       setMsg("Lỗi khi cập nhật trạng thái xác nhận, thử lại.");
     } finally {
-      setBusy(false);
+      if (manageBusy) setBusy(false);
     }
   }
 
@@ -773,7 +845,7 @@ export default function LabelToolPage({ params }) {
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [busy, history, images, current, chosenName, tool, selectedBoxIndex, isBoxLocked, filterTab, visibleImages, visiblePos]);
+  }, [busy, undoStack, images, current, chosenName, tool, selectedBoxIndex, isBoxLocked, filterTab, visibleImages, visiblePos, labeledSet, labelsMap, confirmedSet]);
 
   if (status === "loading") return <p style={{ padding: 20 }}>Đang tải...</p>;
 
@@ -965,7 +1037,9 @@ export default function LabelToolPage({ params }) {
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 4, marginBottom: 8 }}>
                 <button onClick={showPrev} disabled={busy || visiblePos === 0 || !visibleImages.length}>{"<< Back"}</button>
                 <button onClick={showNext} disabled={busy || visiblePos === visibleImages.length - 1 || !visibleImages.length}>{"Next >>"}</button>
-                <button onClick={undoLast} disabled={busy}>Hoàn tác (Ctrl+Z)</button>
+                <button onClick={undoLast} disabled={busy} title="Hoàn tác thao tác gần nhất: nhãn mật độ, vẽ/sửa/xoá box, xác nhận box">
+                  Hoàn tác (Ctrl+Z){undoStack.length ? ` · ${undoStack.length}` : ""}
+                </button>
                 <button onClick={deleteCurrentImage} disabled={busy}>Xóa ảnh (Del)</button>
               </div>
 
