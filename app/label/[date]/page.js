@@ -161,7 +161,8 @@ export default function LabelToolPage({ params }) {
   const [boxesMap, setBoxesMap] = useState({}); // {filename: [[x,y,w,h],...]}
   const [confirmedSet, setConfirmedSet] = useState(new Set()); // filename đã Xác nhận box (khoá)
   const [loadingBoxes, setLoadingBoxes] = useState(true);
-  const [filterTab, setFilterTab] = useState("todo"); // "todo" | "done"
+  // "todo" | "done:0" | "done:1" | "done:2" | "done:other"
+  const [filterTab, setFilterTab] = useState("todo");
   const [tool, setTool] = useState("pen"); // "pen" (vẽ) | "edit" (chỉnh sửa) | "eraser" (xoá)
   const [selectedBoxIndex, setSelectedBoxIndex] = useState(-1); // box được select để sửa/xóa
 
@@ -306,20 +307,51 @@ export default function LabelToolPage({ params }) {
     [labeledSet, confirmedSet]
   );
 
+  // Lớp mật độ đã gán của 1 ảnh ("0" | "1" | "2" | null)
+  const classOf = useCallback(
+    (name) => {
+      const rec = labelsMap[name];
+      return rec ? String(rec.labelId) : null;
+    },
+    [labelsMap]
+  );
+
   // Mỗi phần tử = { img, i } với i = index trong mảng `images` gốc
   const visibleImages = useMemo(() => {
     const out = [];
+    const wantClass = filterTab.startsWith("done:") ? filterTab.slice(5) : null;
     for (let i = 0; i < images.length; i++) {
-      const done = isImageDone(images[i].name);
-      if (filterTab === "done" ? done : !done) out.push({ img: images[i], i });
+      const name = images[i].name;
+      const done = isImageDone(name);
+      if (!wantClass) {
+        if (!done) out.push({ img: images[i], i });
+        continue;
+      }
+      if (!done) continue;
+      const cls = classOf(name);
+      const known = cls === "0" || cls === "1" || cls === "2";
+      if (wantClass === "other" ? !known : cls === wantClass) out.push({ img: images[i], i });
     }
     return out;
-  }, [images, filterTab, isImageDone]);
+  }, [images, filterTab, isImageDone, classOf]);
 
-  const doneCount = useMemo(
-    () => images.reduce((n, img) => n + (isImageDone(img.name) ? 1 : 0), 0),
-    [images, isImageDone]
-  );
+  // Bộ đếm cho từng tab
+  const tabCounts = useMemo(() => {
+    const c = { todo: 0, done: 0, 0: 0, 1: 0, 2: 0, other: 0 };
+    for (const img of images) {
+      if (!isImageDone(img.name)) {
+        c.todo++;
+        continue;
+      }
+      c.done++;
+      const cls = classOf(img.name);
+      if (cls === "0" || cls === "1" || cls === "2") c[cls]++;
+      else c.other++;
+    }
+    return c;
+  }, [images, isImageDone, classOf]);
+
+  const doneCount = tabCounts.done;
 
   // Vị trí của ảnh hiện tại trong danh sách đang hiển thị (-1 = không nằm trong tab)
   const visiblePos = useMemo(() => visibleImages.findIndex((v) => v.i === index), [visibleImages, index]);
@@ -953,10 +985,16 @@ export default function LabelToolPage({ params }) {
       </div>
 
       <div style={{ display: "flex", flexDirection: "column", gap: 8, flex: 1, minHeight: 0 }}>
-        <div style={{ display: "flex", gap: 4, alignItems: "center", flexShrink: 0, fontSize: 12 }}>
+        <div style={{ display: "flex", gap: 4, alignItems: "center", flexShrink: 0, fontSize: 12, flexWrap: "wrap" }}>
           {[
-            { key: "todo", label: `Chưa gán nhãn (${images.length - doneCount})` },
-            { key: "done", label: `Đã gán nhãn (${doneCount})` },
+            { key: "todo", label: `Chưa gán nhãn (${tabCounts.todo})` },
+            ...CLASSES.map((c) => ({
+              key: `done:${c.id}`,
+              label: `Đã gán ~ [${c.id}] ${c.name} (${tabCounts[String(c.id)]})`,
+            })),
+            ...(tabCounts.other > 0
+              ? [{ key: "done:other", label: `Đã gán ~ khác (${tabCounts.other})` }]
+              : []),
           ].map((t) => (
             <button key={t.key} onClick={() => setFilterTab(t.key)} style={tabBtnStyle(filterTab === t.key)}>
               {t.label}
