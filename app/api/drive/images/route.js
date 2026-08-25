@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { getServerSession } from "next-auth/next";
 import { authOptions } from "@/lib/authOptions";
 import { findFolderIdByDate, listImagesInFolder, invalidateCachesForDate } from "@/lib/drive";
-import { getLabeledFilenames, getDeletedFilenames } from "@/lib/sheets";
+import { getLabeledFilenames, getDeletedFilenames, getDensityLabels } from "@/lib/sheets";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -25,10 +25,11 @@ export async function GET(request) {
       return NextResponse.json({ error: "folder not found" }, { status: 404 });
     }
 
-    const [images, labeled, deleted] = await Promise.all([
+    const [images, labeled, deleted, labelInfo] = await Promise.all([
       listImagesInFolder(folderId),
       getLabeledFilenames(date).catch(() => new Set()),
       getDeletedFilenames(date).catch(() => new Set()),
+      getDensityLabels(date).catch(() => ({})),
     ]);
 
     // Lọc bỏ những ảnh đã bị đánh dấu DELETED
@@ -44,6 +45,10 @@ export async function GET(request) {
           : null,
       })),
       labeled: Array.from(labeled).filter((name) => !deleted.has(name)),
+      // { filename: { labelId, labelName, note } } — để client tô sáng nhãn đang có
+      labels: Object.fromEntries(
+        Object.entries(labelInfo).filter(([name]) => !deleted.has(name))
+      ),
     });
   } catch (err) {
     console.error("/api/drive/images error:", err);

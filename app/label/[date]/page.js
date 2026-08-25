@@ -129,6 +129,7 @@ const CLASSES = [
 
 const TIME_OPTIONS = ["Buổi sáng", "Buổi tối"];
 const TIME_EN = { "Buổi sáng": "Morning", "Buổi tối": "Evening" };
+const TIME_FROM_EN = { Morning: "Buổi sáng", Evening: "Buổi tối" };
 
 const SIDEBAR_W = 320;
 const HEADER_H = 40; // chiều cao ước lượng của thanh header 1 dòng phía trên
@@ -141,6 +142,7 @@ export default function LabelToolPage({ params }) {
   // --- Ảnh + nhãn mật độ ---
   const [images, setImages] = useState([]);
   const [labeledSet, setLabeledSet] = useState(new Set()); // đã gán mật độ
+  const [labelsMap, setLabelsMap] = useState({}); // {filename: {labelId, labelName, note}}
   const [loadingImages, setLoadingImages] = useState(true);
   const [index, setIndex] = useState(0);
   const [noteTime, setNoteTime] = useState(null);
@@ -198,11 +200,13 @@ export default function LabelToolPage({ params }) {
       if (!res.ok) {
         setImages([]);
         setLabeledSet(new Set());
+        setLabelsMap({});
         return;
       }
       const data = await res.json();
       setImages(data.images || []);
       setLabeledSet(new Set(data.labeled || []));
+      setLabelsMap(data.labels || {});
     } finally {
       setLoadingImages(false);
     }
@@ -260,6 +264,7 @@ export default function LabelToolPage({ params }) {
   const current = images[index];
   const isBoxLocked = current ? confirmedSet.has(current.name) : false;
   const isDensityDone = current ? labeledSet.has(current.name) : false;
+  const currentLabelId = current && labelsMap[current.name] ? String(labelsMap[current.name].labelId) : null;
   const currentBoxes = useMemo(() => (current ? boxesMap[current.name] || [] : []), [current, boxesMap]);
 
   // Ref "gương" của state, để các callback truyền xuống BoxCanvas giữ nguyên
@@ -336,6 +341,16 @@ export default function LabelToolPage({ params }) {
     setSelectedBoxIndex(-1);
   }, [current?.id]);
 
+  // Ảnh đã có nhãn → hiện đúng ghi chú đã lưu của ảnh đó.
+  // Ảnh chưa gán thì giữ nguyên lựa chọn hiện tại (tiện gán hàng loạt).
+  useEffect(() => {
+    if (!current) return;
+    const saved = labelsMap[current.name];
+    if (!saved) return;
+    setNoteTime(TIME_FROM_EN[saved.note] || null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [current?.id, labelsMap]);
+
   useEffect(() => {
     if (!visibleImages.length) return;
     const pos = visiblePos;
@@ -403,8 +418,13 @@ export default function LabelToolPage({ params }) {
 
     const prevLabeledSet = new Set(labeledSet);
     const prevHistory = history;
+    const prevLabelsMap = labelsMap;
 
     setLabeledSet((prev) => new Set(prev).add(current.name));
+    setLabelsMap((prev) => ({
+      ...prev,
+      [current.name]: { labelId: String(cls.id), labelName: cls.nameEn, note },
+    }));
     setHistory((prev) => [...prev, { filename: current.name }]);
 
     const chosen = chosenName;
@@ -426,6 +446,7 @@ export default function LabelToolPage({ params }) {
     } catch (error) {
       setLabeledSet(prevLabeledSet);
       setHistory(prevHistory);
+      setLabelsMap(prevLabelsMap);
       setMsg("Lỗi khi lưu nhãn, thử lại.");
     } finally {
       setBusy(false);
@@ -462,6 +483,11 @@ export default function LabelToolPage({ params }) {
       setLabeledSet((prev) => {
         const next = new Set(prev);
         next.delete(targetFilename);
+        return next;
+      });
+      setLabelsMap((prev) => {
+        const next = { ...prev };
+        delete next[targetFilename];
         return next;
       });
       if (isFromHistory) {
@@ -776,6 +802,19 @@ export default function LabelToolPage({ params }) {
     fontSize: 12,
   });
 
+  const classBtnStyle = (active) => ({
+    padding: "10px 8px",
+    textAlign: "left",
+    borderRadius: 4,
+    cursor: "pointer",
+    fontSize: 13,
+    border: active ? "2px solid #1a7f37" : "1px solid #bbb",
+    background: active ? "#d6f5de" : "#f2f2f2",
+    color: active ? "#0b5c25" : "#222",
+    fontWeight: active ? 700 : 400,
+    boxShadow: active ? "0 0 0 2px rgba(26,127,55,.18)" : "none",
+  });
+
   const toolBtnStyle = (active) => ({
     padding: "6px 10px",
     marginRight: 6,
@@ -902,16 +941,25 @@ export default function LabelToolPage({ params }) {
                     {t} ({t === TIME_OPTIONS[0] ? "M" : "T"})
                   </span>
                 ))}
-                <span style={chipStyle(false)} onClick={() => setNoteTime(null)}>Xoá (N)</span>
+                <span style={chipStyle(!noteTime)} onClick={() => setNoteTime(null)}>Xoá (N)</span>
               </div>
 
               <div style={{ fontWeight: "bold", marginBottom: 4 }}>Gán mật độ giao thông:</div>
               <div style={{ display: "grid", gridTemplateColumns: "1fr", gap: 4, marginBottom: 10 }}>
-                {CLASSES.map((c) => (
-                  <button key={c.id} onClick={() => assignLabel(c)} disabled={busy} title={c.criteria} style={{ padding: "10px 8px", textAlign: "left" }}>
-                    [{c.id}] {c.name}
-                  </button>
-                ))}
+                {CLASSES.map((c) => {
+                  const active = currentLabelId === String(c.id);
+                  return (
+                    <button
+                      key={c.id}
+                      onClick={() => assignLabel(c)}
+                      disabled={busy}
+                      title={c.criteria}
+                      style={classBtnStyle(active)}
+                    >
+                      {active ? "✓ " : ""}[{c.id}] {c.name}
+                    </button>
+                  );
+                })}
               </div>
 
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 4, marginBottom: 8 }}>
@@ -930,7 +978,13 @@ export default function LabelToolPage({ params }) {
               </div>
 
               <div style={{ display: "flex", gap: 6, marginBottom: 6, flexWrap: "wrap", alignItems: "center" }}>
-                <button onClick={() => setBoxConfirm(true)} disabled={busy || isBoxLocked}>Xác nhận box</button>
+                <button
+                  onClick={() => setBoxConfirm(true)}
+                  disabled={busy || isBoxLocked}
+                  style={isBoxLocked ? { border: "2px solid #1a7f37", background: "#d6f5de", color: "#0b5c25", fontWeight: 700, borderRadius: 4, padding: "5px 10px" } : undefined}
+                >
+                  {isBoxLocked ? "✓ Đã xác nhận box" : "Xác nhận box"}
+                </button>
                 <button onClick={() => setBoxConfirm(false)} disabled={busy || !isBoxLocked}>Đánh label lại</button>
                 {selectedBoxIndex >= 0 && (
                   <button onClick={removeSelectedBox} disabled={busy || isBoxLocked} style={{ background: "#ff3b30", color: "#fff" }}>
