@@ -332,6 +332,24 @@ export default function LabelToolPage({ params }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [filterTab]);
 
+  // Lần tải dữ liệu ĐẦU TIÊN: lúc mount `images` còn rỗng nên effect ở trên
+  // thoát sớm, khiến index kẹt ở 0 (ảnh số 1 của toàn bộ danh sách, có thể đã
+  // gán nhãn rồi) dù tab đang là "Chưa gán nhãn". Nhảy về ảnh đầu tiên của tab
+  // đúng một lần, sau khi ảnh + box đã tải xong.
+  const didInitialJumpRef = useRef(false);
+  useEffect(() => {
+    didInitialJumpRef.current = false;
+  }, [date]);
+  useEffect(() => {
+    if (didInitialJumpRef.current) return;
+    if (loading || !images.length) return;
+    didInitialJumpRef.current = true;
+    if (!visibleImages.length) return;
+    if (visibleImages.some((v) => v.i === index)) return;
+    setIndex(visibleImages[0].i);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loading, images.length, visibleImages]);
+
   const preloadQueueRef = useRef(new Set());
 
   function preloadImageByData(imgData) {
@@ -581,9 +599,14 @@ export default function LabelToolPage({ params }) {
         alert(`Lỗi khi xóa ảnh: ${err.error || "thử lại."}`);
         return;
       }
+      const info = await res.json().catch(() => ({}));
       setImages((prev) => prev.filter((img) => img.id !== current.id));
       setUndoStack((prev) => prev.filter((e) => e.filename !== current.name));
-      setMsg(`Đã xóa "${current.name}" (thao tác xoá ảnh không hoàn tác được).`);
+      setMsg(
+        info.movedCount
+          ? `Đã chuyển "${current.name}" → ${info.movedTo} (${info.movedAs === "user" ? "bằng tài khoản của bạn" : "service account"})`
+          : `⚠ Ẩn "${current.name}" khỏi tool nhưng KHÔNG move được trên Drive: ${info.driveError || "không rõ lý do"}`
+      );
     } catch (err) {
       alert(`Lỗi khi xóa ảnh: ${err.message || "thử lại."}`);
     } finally {
@@ -909,8 +932,23 @@ export default function LabelToolPage({ params }) {
           {loading ? "..." : "↻ (U)"}
         </button>
         {current && <span>[{index + 1}/{images.length}] {current.name}</span>}
-        <span style={{ marginLeft: "auto", color: "#666" }}>
-          {status === "authenticated" ? session.user.email : <button onClick={() => signIn("google")}>Đăng nhập Google</button>}
+        <span style={{ marginLeft: "auto", color: "#666", display: "flex", alignItems: "center", gap: 8 }}>
+          {status === "authenticated" ? (
+            <>
+              {session.user.email}
+              {session.user.driveWritable === false && (
+                <button
+                  onClick={() => signIn("google")}
+                  title="Phiên đăng nhập này chưa có quyền ghi Drive nên không di chuyển được ảnh khi xoá. Đăng nhập lại để cấp quyền."
+                  style={{ background: "#fff4e5", border: "1px solid #e0a800", color: "#8a6100", borderRadius: 4, cursor: "pointer" }}
+                >
+                  ⚠ Cấp quyền Drive
+                </button>
+              )}
+            </>
+          ) : (
+            <button onClick={() => signIn("google")}>Đăng nhập Google</button>
+          )}
         </span>
       </div>
 
@@ -928,8 +966,8 @@ export default function LabelToolPage({ params }) {
             {visibleImages.length === 0
               ? "— tab này chưa có ảnh nào"
               : visiblePos >= 0
-                ? `đang xem ${visiblePos + 1}/${visibleImages.length} trong tab`
-                : "ảnh đang xem không thuộc tab này"}
+                ? `đang xem ${visiblePos + 1}/${visibleImages.length} trong tab · số dưới ảnh là STT trong cả ${images.length} ảnh`
+                : "⚠ ảnh đang xem KHÔNG thuộc tab này"}
           </span>
         </div>
 

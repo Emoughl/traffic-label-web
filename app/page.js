@@ -7,6 +7,7 @@ import { useRouter } from "next/navigation";
 export default function DateSelectorPage() {
   const { data: session, status } = useSession();
   const [folders, setFolders] = useState([]);
+  const [deletedCount, setDeletedCount] = useState(null);
   const [loading, setLoading] = useState(false);
   const router = useRouter();
 
@@ -16,6 +17,10 @@ export default function DateSelectorPage() {
       const res = await fetch("/api/drive/folders");
       const data = await res.json();
       setFolders(data.folders || []);
+      fetch("/api/drive/deleted")
+        .then((r) => r.json())
+        .then((d) => setDeletedCount(d.total ?? 0))
+        .catch(() => setDeletedCount(null));
     } catch (err) {
       console.error(err);
     } finally {
@@ -92,6 +97,28 @@ export default function DateSelectorPage() {
             {f.name}&nbsp;&nbsp;&nbsp;({f.labeledCount}/{f.total} đã gán nhãn)
           </button>
         ))}
+
+        {/* Thùng ảnh đã xoá — chỉ để xem lại và khôi phục */}
+        <button
+          onClick={() => router.push("/deleted")}
+          style={{
+            display: "block",
+            width: "100%",
+            textAlign: "left",
+            padding: "12px 15px",
+            margin: "14px 0 6px",
+            fontSize: 15,
+            background: "#fff8f8",
+            border: "1px dashed #d9a0a0",
+            borderRadius: 4,
+            color: "#8a2b2b",
+          }}
+        >
+          🗑 Ảnh đã xoá&nbsp;&nbsp;&nbsp;
+          <span style={{ fontSize: 13, color: "#a06a6a" }}>
+            ({deletedCount === null ? "…" : `${deletedCount} ảnh`} — chỉ xem &amp; khôi phục)
+          </span>
+        </button>
       </div>
     </div>
   );
