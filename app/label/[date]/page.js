@@ -14,7 +14,7 @@ const THUMB_OVERSCAN = 8; // render dư 2 bên cho mượt khi cuộn
 
 // --- Thumbnail: chỉ những ô đang lọt trong khung nhìn mới được render (xem
 // VirtualThumbStrip bên dưới), nên ở đây không cần IntersectionObserver nữa. ---
-const Thumbnail = memo(function Thumbnail({ img, isActive, onClick, label }) {
+const Thumbnail = memo(function Thumbnail({ img, isActive, isSelected, onClick, label }) {
   const [useFallback, setUseFallback] = useState(false);
 
   // Ưu tiên thumbnailUrl từ Google CDN, fallback proxy nếu lỗi hoặc không có
@@ -25,10 +25,17 @@ const Thumbnail = memo(function Thumbnail({ img, isActive, onClick, label }) {
     <button
       onClick={onClick}
       style={{
+        position: "relative",
         width: THUMB_W, minWidth: THUMB_W, boxSizing: "border-box", padding: 4,
-        border: isActive ? "2px solid #4da3ff" : "1px solid #ddd",
+        border: isActive
+          ? "2px solid #4da3ff"
+          : isSelected
+            ? "2px solid #ff8c00"
+            : "1px solid #ddd",
+        outline: isSelected && isActive ? "2px solid #ff8c00" : "none",
+        outlineOffset: -4,
         borderRadius: 4,
-        background: isActive ? "#eaf3ff" : "#fff",
+        background: isSelected ? "#fff1de" : isActive ? "#eaf3ff" : "#fff",
         cursor: "pointer",
         display: "flex", flexDirection: "column", alignItems: "center", gap: 4,
       }}
@@ -42,6 +49,16 @@ const Thumbnail = memo(function Thumbnail({ img, isActive, onClick, label }) {
         onError={() => { if (!useFallback && img.thumbnailUrl) setUseFallback(true); }}
         style={{ width: 68, height: 42, objectFit: "cover", borderRadius: 3, background: "#111", display: "block" }}
       />
+      {isSelected && (
+        <span
+          style={{
+            position: "absolute", top: 2, right: 2, width: 14, height: 14, borderRadius: 7,
+            background: "#ff8c00", color: "#fff", fontSize: 10, lineHeight: "14px", textAlign: "center",
+          }}
+        >
+          ✓
+        </span>
+      )}
       <span style={{ fontSize: 10, lineHeight: 1.2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", width: "100%" }}>
         {label}
       </span>
@@ -52,7 +69,7 @@ const Thumbnail = memo(function Thumbnail({ img, isActive, onClick, label }) {
 /** Dải thumbnail dạng "virtual list": dù có 7000 ảnh thì DOM cũng chỉ giữ
  * khoảng vài chục nút đang nhìn thấy. Hai div đệm 2 bên giữ đúng chiều dài
  * thanh cuộn nên cảm giác cuộn không khác gì render hết. */
-const VirtualThumbStrip = memo(function VirtualThumbStrip({ items, activeIndex, activePos, onPick }) {
+const VirtualThumbStrip = memo(function VirtualThumbStrip({ items, activeIndex, activePos, selectedSet, onPick }) {
   const scrollerRef = useRef(null);
   const [range, setRange] = useState({ start: 0, end: 30 });
 
@@ -102,7 +119,7 @@ const VirtualThumbStrip = memo(function VirtualThumbStrip({ items, activeIndex, 
   return (
     <div
       ref={scrollerRef}
-      style={{ display: "flex", overflowX: "auto", paddingBottom: 4, borderBottom: "1px solid #ddd", flexShrink: 0 }}
+      style={{ display: "flex", overflowX: "auto", paddingBottom: 4, borderBottom: "1px solid #ddd", flexShrink: 0, userSelect: "none" }}
     >
       <div style={{ width: range.start * THUMB_STRIDE, flexShrink: 0 }} />
       <div style={{ display: "flex", gap: THUMB_GAP, flexShrink: 0 }}>
@@ -111,7 +128,8 @@ const VirtualThumbStrip = memo(function VirtualThumbStrip({ items, activeIndex, 
             key={img.id}
             img={img}
             isActive={i === activeIndex}
-            onClick={() => onPick(i)}
+            isSelected={selectedSet?.has(i)}
+            onClick={(e) => onPick(i, e)}
             label={i + 1}
           />
         ))}
@@ -165,6 +183,8 @@ export default function LabelToolPage({ params }) {
   const [filterTab, setFilterTab] = useState("todo");
   const [tool, setTool] = useState("pen"); // "pen" (vẽ) | "edit" (chỉnh sửa) | "eraser" (xoá)
   const [selectedBoxIndex, setSelectedBoxIndex] = useState(-1); // box được select để sửa/xóa
+  const [selectedImgs, setSelectedImgs] = useState(() => new Set()); // index toàn cục các ảnh đang bôi chọn
+  const anchorPosRef = useRef(-1); // mốc để Shift+click chọn dải
 
   // --- Kích thước khung ảnh khả dụng (đo thật, để canvas to hết cỡ không chừa khoảng trống) ---
   const canvasWrapRef = useRef(null);
@@ -294,8 +314,31 @@ export default function LabelToolPage({ params }) {
     if (idx !== -1) setIndex(idx);
   }, []);
 
-  const pickIndex = useCallback((i) => {
+  const pickIndex = useCallback((i, e) => {
     if (loadingRef.current) return;
+    const list = visibleImagesRef.current;
+    const pos = list.findIndex((v) => v.i === i);
+
+    if (e?.shiftKey && anchorPosRef.current >= 0 && pos >= 0) {
+      // Shift+click: bôi chọn cả dải từ mốc trước tới ảnh vừa bấm
+      const from = Math.min(anchorPosRef.current, pos);
+      const to = Math.max(anchorPosRef.current, pos);
+      const next = new Set();
+      for (let p = from; p <= to; p++) next.add(list[p].i);
+      setSelectedImgs(next);
+    } else if (e && (e.ctrlKey || e.metaKey)) {
+      // Ctrl/Cmd+click: thêm/bớt từng ảnh
+      setSelectedImgs((prev) => {
+        const next = new Set(prev);
+        if (next.has(i)) next.delete(i);
+        else next.add(i);
+        return next;
+      });
+      anchorPosRef.current = pos;
+    } else {
+      setSelectedImgs(new Set());
+      anchorPosRef.current = pos;
+    }
     setIndex(i);
   }, []);
 
@@ -355,6 +398,20 @@ export default function LabelToolPage({ params }) {
 
   // Vị trí của ảnh hiện tại trong danh sách đang hiển thị (-1 = không nằm trong tab)
   const visiblePos = useMemo(() => visibleImages.findIndex((v) => v.i === index), [visibleImages, index]);
+
+  const visibleImagesRef = useRef(visibleImages);
+  visibleImagesRef.current = visibleImages;
+
+  // Đổi tab thì bỏ hết lựa chọn cũ (index toàn cục không còn ý nghĩa trong tab mới)
+  useEffect(() => {
+    setSelectedImgs(new Set());
+    anchorPosRef.current = -1;
+  }, [filterTab]);
+
+  const selectedImages = useMemo(
+    () => [...selectedImgs].map((i) => images[i]).filter(Boolean),
+    [selectedImgs, images]
+  );
 
   // Đổi tab mà ảnh đang xem không thuộc tab đó → nhảy tới ảnh đầu tiên của tab
   useEffect(() => {
@@ -607,10 +664,16 @@ export default function LabelToolPage({ params }) {
     }
   }
 
-  async function deleteCurrentImage() {
-    if (!current || busy) return;
+  /** Xoá 1 hoặc nhiều ảnh (chuyển sang Deleted/{ngày} trên Drive). */
+  async function deleteImages(targets) {
+    const list = (targets || []).filter(Boolean);
+    if (!list.length || busy) return;
+
+    const many = list.length > 1;
     const confirmDel = window.confirm(
-      `Bạn có chắc muốn xóa ảnh "${current.name}"?\nẢnh sẽ được chuyển vào thư mục Deleted/${date}`
+      many
+        ? `Bạn có chắc muốn xóa ${list.length} ảnh đã chọn?\nẢnh sẽ được chuyển vào thư mục Deleted/${date}`
+        : `Bạn có chắc muốn xóa ảnh "${list[0].name}"?\nẢnh sẽ được chuyển vào thư mục Deleted/${date}`
     );
     if (!confirmDel) return;
 
@@ -620,8 +683,8 @@ export default function LabelToolPage({ params }) {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          fileIds: [current.id],
-          filenames: [current.name],
+          fileIds: list.map((i) => i.id),
+          filenames: list.map((i) => i.name),
           date,
           labeledBy: chosenName,
         }),
@@ -632,18 +695,34 @@ export default function LabelToolPage({ params }) {
         return;
       }
       const info = await res.json().catch(() => ({}));
-      setImages((prev) => prev.filter((img) => img.id !== current.id));
-      setUndoStack((prev) => prev.filter((e) => e.filename !== current.name));
+      const idSet = new Set(list.map((i) => i.id));
+      const nameSet = new Set(list.map((i) => i.name));
+
+      setImages((prev) => prev.filter((img) => !idSet.has(img.id)));
+      setUndoStack((prev) => prev.filter((e) => !nameSet.has(e.filename)));
+      setSelectedImgs(new Set());
+      anchorPosRef.current = -1;
+
+      const what = many ? `${list.length} ảnh` : `"${list[0].name}"`;
       setMsg(
         info.movedCount
-          ? `Đã chuyển "${current.name}" → ${info.movedTo} (${info.movedAs === "user" ? "bằng tài khoản của bạn" : "service account"})`
-          : `⚠ Ẩn "${current.name}" khỏi tool nhưng KHÔNG move được trên Drive: ${info.driveError || "không rõ lý do"}`
+          ? `Đã chuyển ${what} → ${info.movedTo}${info.failedCount ? ` (${info.failedCount} ảnh lỗi)` : ""}`
+          : `⚠ Ẩn ${what} khỏi tool nhưng KHÔNG move được trên Drive: ${info.driveError || "không rõ lý do"}`
       );
     } catch (err) {
       alert(`Lỗi khi xóa ảnh: ${err.message || "thử lại."}`);
     } finally {
       setBusy(false);
     }
+  }
+
+  /** Del: xoá cả nhóm đang bôi chọn, nếu không có thì xoá ảnh đang xem. */
+  function deleteCurrentImage() {
+    if (selectedImgs.size > 0) {
+      deleteImages(selectedImages);
+      return;
+    }
+    if (current) deleteImages([current]);
   }
 
   // Hàm extract time từ filename (format: 20260808_000006_323 → "00:00:06")
@@ -891,6 +970,11 @@ export default function LabelToolPage({ params }) {
         setNoteTime((v) => (v === TIME_OPTIONS[1] ? null : TIME_OPTIONS[1]));
       } else if (lkey === "n") {
         setNoteTime(null);
+      } else if (key === "Escape") {
+        if (selectedImgs.size) {
+          setSelectedImgs(new Set());
+          anchorPosRef.current = -1;
+        }
       } else if (key === "Enter") {
         e.preventDefault();
         if (!isBoxLocked) setBoxConfirm(true);
@@ -900,7 +984,7 @@ export default function LabelToolPage({ params }) {
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [busy, undoStack, images, current, chosenName, tool, selectedBoxIndex, isBoxLocked, filterTab, visibleImages, visiblePos, labeledSet, labelsMap, confirmedSet]);
+  }, [busy, undoStack, images, current, chosenName, tool, selectedBoxIndex, isBoxLocked, filterTab, visibleImages, visiblePos, labeledSet, labelsMap, confirmedSet, selectedImgs, selectedImages]);
 
   if (status === "loading") return <p style={{ padding: 20 }}>Đang tải...</p>;
 
@@ -1000,11 +1084,26 @@ export default function LabelToolPage({ params }) {
               {t.label}
             </button>
           ))}
+          {selectedImgs.size > 0 && (
+            <span style={{ display: "inline-flex", alignItems: "center", gap: 6, marginLeft: 6 }}>
+              <span style={{ color: "#c85000", fontWeight: 600 }}>Đã chọn {selectedImgs.size} ảnh</span>
+              <button
+                onClick={() => deleteImages(selectedImages)}
+                disabled={busy}
+                style={{ background: "#ff3b30", color: "#fff", border: "none", borderRadius: 4, padding: "3px 10px", cursor: "pointer", fontSize: 12 }}
+              >
+                🗑 Xoá {selectedImgs.size} ảnh
+              </button>
+              <button onClick={() => { setSelectedImgs(new Set()); anchorPosRef.current = -1; }} style={{ fontSize: 12 }}>
+                Bỏ chọn (Esc)
+              </button>
+            </span>
+          )}
           <span style={{ color: "#888", marginLeft: 4 }}>
             {visibleImages.length === 0
               ? "— tab này chưa có ảnh nào"
               : visiblePos >= 0
-                ? `đang xem ${visiblePos + 1}/${visibleImages.length} trong tab · số dưới ảnh là STT trong cả ${images.length} ảnh`
+                ? `đang xem ${visiblePos + 1}/${visibleImages.length} trong tab · Shift+click để chọn dải, Ctrl/Cmd+click để chọn lẻ`
                 : "⚠ ảnh đang xem KHÔNG thuộc tab này"}
           </span>
         </div>
@@ -1013,6 +1112,7 @@ export default function LabelToolPage({ params }) {
           items={visibleImages}
           activeIndex={index}
           activePos={visiblePos}
+          selectedSet={selectedImgs}
           onPick={pickIndex}
         />
 
@@ -1116,7 +1216,13 @@ export default function LabelToolPage({ params }) {
                 <button onClick={undoLast} disabled={busy} title="Hoàn tác thao tác gần nhất: nhãn mật độ, vẽ/sửa/xoá box, xác nhận box">
                   Hoàn tác (Ctrl+Z){undoStack.length ? ` · ${undoStack.length}` : ""}
                 </button>
-                <button onClick={deleteCurrentImage} disabled={busy}>Xóa ảnh (Del)</button>
+                <button
+                  onClick={deleteCurrentImage}
+                  disabled={busy}
+                  style={selectedImgs.size > 0 ? { background: "#ff3b30", color: "#fff", border: "none", borderRadius: 4 } : undefined}
+                >
+                  {selectedImgs.size > 0 ? `Xóa ${selectedImgs.size} ảnh (Del)` : "Xóa ảnh (Del)"}
+                </button>
               </div>
 
               <hr style={{ border: "none", borderTop: "1px solid #ddd", margin: "8px 0" }} />
